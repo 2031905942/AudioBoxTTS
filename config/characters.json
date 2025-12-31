@@ -1,0 +1,59 @@
+{
+  "characters": [
+    {
+      "id": "8f500caf-4bce-4350-a96d-509b430d1f60",
+      "name": "到底",
+      "avatar_path": "",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2025-12-30T14:18:36.995730"
+    },
+    {
+      "id": "891b903b-e1b6-47c8-9571-e9b1b0938ba0",
+      "name": "布布",
+      "avatar_path": "C:/Work/Learning/AudioBoxTTS/Resource/CharacterIcon/熬最晚的夜.png",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
+      "last_output_dir": "C:/Users/Admin/Music",
+      "last_output_filename": "布布_1767005867.wav",
+      "created_at": "2025-12-29T18:56:14.333875"
+    },
+    {
+      "id": "a727e959-7c98-44eb-85ee-73e9903dc1f4",
+      "name": "哈哈哈",
+      "avatar_path": "",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2025-12-29T19:41:10.757601"
+    },
+    {
+      "id": "a286fef3-9fa0-4c57-9ae9-91aa2646c6c4",
+      "name": "Hero1001",
+      "avatar_path": "",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2025-12-30T14:28:56.282039"
+    },
+    {
+      "id": "a3c14f46-b735-4a1c-b04f-b5d95f287d07",
+      "name": "萝莉",
+      "avatar_path": "C:/Work/Learning/AudioBoxTTS/Resource/CharacterIcon/累成一滩泥.png",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
+      "last_output_dir": "C:/Users/Admin/Music",
+      "last_output_filename": "萝莉_1767086710.wav",
+      "created_at": "2025-12-29T18:52:51.926591"
+    },
+    {
+      "id": "989949bf-130a-458f-a4c7-1e90e8f3429b",
+      "name": "吃饭",
+      "avatar_path": "",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
+      "last_output_dir": "C:/Users/Admin/Music",
+      "last_output_filename": "吃饭_1767080144.wav",
+      "created_at": "2025-12-30T12:02:56.649613"
+    }
+  ],
+  "selected_character_id": "8f500caf-4bce-4350-a96d-509b430d1f60"
+}

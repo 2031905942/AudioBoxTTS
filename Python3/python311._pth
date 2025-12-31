@@ -1,0 +1,14 @@
+python311.zip
+.
+Scripts
+Lib\site-packages
+# AudioBox Source 目录（包含 indextts 模块）
+..\Source
+E:\Program Files\CMake\bin
+E:\Program Files\Jetbrains\Toolbox\PyCharm Professional\plugins\python\helpers\profiler
+E:\Program Files\Jetbrains\Toolbox\PyCharm Professional\plugins\python\helpers\pydev
+E:\Program Files\Jetbrains\Toolbox\PyCharm Professional\plugins\python\helpers\third_party\thriftpy
+C:\Users\admin\AppData\Local\Programs\PyCharm Professional\plugins\python\helpers\pydev
+C:\Users\admin\AppData\Local\Programs\PyCharm Professional\plugins\python\helpers\third_party\thriftpy
+# Uncomment to run site.main() automatically
+import site

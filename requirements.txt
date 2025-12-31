@@ -1,0 +1,28 @@
+autobahn
+cffi<2.0.0
+chardet
+jellyfish
+lxml
+numpy
+openpyxl
+packaging
+pip-tools
+pipdeptree
+psutil
+pydub
+pyloudnorm
+PyMySQL
+pypinyin
+PySide6
+PySide6-Fluent-Widgets
+pysmb
+PySoundFile
+ruamel.yaml
+Send2Trash
+waapi-client
+webdav4
+
+# IndexTTS2 依赖说明：
+# IndexTTS2 (AI语音) 的依赖通过 install_indextts_deps.py 脚本安装
+# 主要包括: torch, torchaudio, transformers, accelerate, librosa 等
+# 详见 INDEXTTS_README.md
