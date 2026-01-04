@@ -1,35 +1,24 @@
-"""
-IndexTTS2 推理工具类
+"""IndexTTS2 推理控制器（GUI 安全隔离版）。
 
-封装 IndexTTS2 的核心推理功能，运行在工作线程中。
-支持两种情感控制模式：
-1. 与音色参考音频相同（emo_mode=0）
-2. 使用情感向量控制（emo_mode=2）
+设计目标：
+- GUI 主进程不 import torch/transformers/indextts；
+- 推理、模型加载都在独立 venv 的子进程中执行；
+- 子进程崩溃/显存泄漏不拖死 GUI。
+
+该类仍保留原有信号/槽接口，以适配现有 UI/Job 映射。
 """
+
+import json
 import os
+import subprocess
 import sys
-from typing import Optional, List, Callable
+import threading
+import time
+from typing import Optional, List
 
 from PySide6.QtCore import QObject, Signal, Slot, QMutex, QMutexLocker
 
-# IndexTTS2 路径配置
-# 优先使用 AudioBox/Source/indextts（独立模式）
-# 如果不存在，则回退到外部的 index-tts 目录（开发模式）
-_SOURCE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_LOCAL_INDEXTTS = os.path.join(_SOURCE_DIR, "indextts")
-_EXTERNAL_INDEXTTS = os.path.abspath(os.path.join(_SOURCE_DIR, "..", "..", "index-tts"))
-
-if os.path.exists(_LOCAL_INDEXTTS):
-    # 独立模式：使用 AudioBox/Source/indextts
-    INDEXTTS_ROOT = _SOURCE_DIR
-    INDEXTTS_MODE = "standalone"
-else:
-    # 开发模式：使用外部 index-tts 目录
-    INDEXTTS_ROOT = _EXTERNAL_INDEXTTS
-    INDEXTTS_MODE = "external"
-
-if INDEXTTS_ROOT not in sys.path:
-    sys.path.insert(0, INDEXTTS_ROOT)
+from Source.Utility.indextts_runtime_utility import get_runtime_paths
 
 
 class IndexTTSUtility(QObject):
@@ -56,15 +45,20 @@ class IndexTTSUtility(QObject):
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
-        self._tts: Optional["IndexTTS2"] = None
         self._mutex = QMutex()
         self._model_dir: str = ""
         self._is_loading: bool = False
 
+        self._engine_proc: Optional[subprocess.Popen] = None
+        self._engine_stderr_thread: Optional[threading.Thread] = None
+        self._engine_stderr_tail: List[str] = []
+        self._device: str = "未加载"
+
     @property
     def is_model_loaded(self) -> bool:
         """模型是否已加载"""
-        return self._tts is not None
+        proc = self._engine_proc
+        return proc is not None and proc.poll() is None and bool(self._model_dir)
 
     @property
     def model_dir(self) -> str:
@@ -74,9 +68,7 @@ class IndexTTSUtility(QObject):
     @property
     def device(self) -> str:
         """当前设备"""
-        if self._tts:
-            return str(self._tts.device)
-        return "未加载"
+        return self._device
 
     @staticmethod
     def get_default_model_dir() -> str:
@@ -87,13 +79,7 @@ class IndexTTSUtility(QObject):
         # AudioBox 根目录
         audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         audiobox_ckpt = os.path.join(audiobox_root, "checkpoints")
-        
-        # 优先使用 AudioBox 目录下的 checkpoints
-        if os.path.exists(audiobox_ckpt):
-            return audiobox_ckpt
-        
-        # 回退到 index-tts 目录
-        return os.path.join(INDEXTTS_ROOT, "checkpoints")
+        return audiobox_ckpt
 
     @staticmethod
     def get_required_files() -> List[str]:
@@ -138,41 +124,44 @@ class IndexTTSUtility(QObject):
             self._is_loading = True
 
         try:
-            self.update_progress_signal.emit(0.1, "检查模型文件...")
+            self.update_progress_signal.emit(0.05, "检查模型文件...")
 
-            # 检查模型文件
             is_complete, missing = self.check_model_files(model_dir)
             if not is_complete:
                 self.error_signal.emit(f"模型文件不完整，缺少: {', '.join(missing)}")
                 return
 
-            self.update_progress_signal.emit(0.2, "导入 IndexTTS2...")
-
-            # 导入 IndexTTS2
-            try:
-                from indextts.infer_v2 import IndexTTS2
-            except ImportError as e:
-                self.error_signal.emit(f"无法导入 IndexTTS2: {e}")
+            paths = get_runtime_paths()
+            if not os.path.exists(paths.venv_python):
+                self.error_signal.emit("未安装 IndexTTS2 独立环境，请先安装环境依赖")
                 return
 
-            self.update_progress_signal.emit(0.3, "加载模型（可能需要 30-60 秒）...")
+            self.update_progress_signal.emit(0.12, "启动独立推理引擎...")
+            self._ensure_engine_started()
 
-            # 加载模型
+            self.update_progress_signal.emit(0.18, "加载模型（独立子进程）...")
             cfg_path = os.path.join(model_dir, "config.yaml")
-            self._tts = IndexTTS2(
-                cfg_path=cfg_path,
-                model_dir=model_dir,
-                use_fp16=use_fp16,
-                use_cuda_kernel=use_cuda_kernel,
-                use_deepspeed=use_deepspeed,
+            self._send_cmd(
+                "load_model",
+                {
+                    "model_dir": model_dir,
+                    "cfg_path": cfg_path,
+                    "use_fp16": use_fp16,
+                    "use_cuda_kernel": use_cuda_kernel,
+                    "use_deepspeed": use_deepspeed,
+                },
             )
+
+            resp = self._wait_for_result({"loaded"}, timeout=180)
+            self._device = resp.get("device") or "Unknown"
             self._model_dir = model_dir
 
-            self.update_progress_signal.emit(1.0, "模型加载完成")
+            self.update_progress_signal.emit(1.0, "模型加载完成（独立子进程）")
             self.model_loaded_signal.emit()
 
         except Exception as e:
             import traceback
+
             self.error_signal.emit(f"模型加载失败: {e}\n{traceback.format_exc()}")
         finally:
             with QMutexLocker(self._mutex):
@@ -192,7 +181,7 @@ class IndexTTSUtility(QObject):
             emo_vector: 情感向量 [喜,怒,哀,惧,厌恶,低落,惊喜,平静]，仅 emo_mode=2 时有效
             emo_weight: 情感权重 0.0-1.0
         """
-        if not self._tts:
+        if not self.is_model_loaded:
             self.error_signal.emit("模型未加载")
             return
 
@@ -205,71 +194,180 @@ class IndexTTSUtility(QObject):
             return
 
         try:
-            self.update_progress_signal.emit(0.1, "准备推理...")
+            self.update_progress_signal.emit(0.05, "准备推理（独立子进程）...")
+            self._send_cmd(
+                "synthesize",
+                {
+                    "spk_audio_prompt": spk_audio_path,
+                    "text": text.strip(),
+                    "output_path": output_path,
+                    "emo_mode": int(emo_mode),
+                    "emo_vector": emo_vector if emo_vector else [0.0] * 8,
+                    "emo_alpha": float(emo_weight),
+                },
+            )
 
-            # 设置 gradio 风格的进度回调
-            class ProgressTracker:
-                def __init__(self, signal):
-                    self._signal = signal
+            resp = self._wait_for_result({"synthesized"}, timeout=600)
+            out_path = resp.get("output_path") or output_path
+            sample_rate = int(resp.get("sample_rate") or 22050)
 
-                def __call__(self, value, desc=""):
-                    # 映射到 0.1-0.9 区间
-                    mapped = 0.1 + value * 0.8
-                    self._signal.emit(mapped, desc)
-
-            self._tts.gr_progress = ProgressTracker(self.update_progress_signal)
-
-            # 准备推理参数
-            kwargs = {
-                "spk_audio_prompt": spk_audio_path,
-                "text": text.strip(),
-                "output_path": output_path,
-                "verbose": False,
-            }
-
-            if emo_mode == self.EMO_MODE_SAME_AS_SPEAKER:
-                # 模式1：与音色参考音频相同
-                # 不传 emo_audio_prompt 和 emo_vector，默认使用 spk_audio_prompt 的情感
-                pass
-
-            elif emo_mode == self.EMO_MODE_VECTOR:
-                # 模式2：情感向量控制
-                if emo_vector and len(emo_vector) == 8:
-                    # 归一化情感向量
-                    normalized_vec = self._tts.normalize_emo_vec(emo_vector, apply_bias=True)
-                    kwargs["emo_vector"] = normalized_vec
-                    # 通过 emo_alpha 控制情感强度（在向量模式下会预先缩放向量）
-                    kwargs["emo_alpha"] = emo_weight
-
-            # 执行推理
-            result = self._tts.infer(**kwargs)
-
-            if result and os.path.exists(output_path):
+            if os.path.exists(out_path):
                 self.update_progress_signal.emit(1.0, "生成完成")
-                # 采样率固定为 22050（IndexTTS2 输出）
-                self.generated_signal.emit(output_path, 22050)
+                self.generated_signal.emit(out_path, sample_rate)
             else:
                 self.error_signal.emit("推理完成但未生成文件")
 
         except Exception as e:
             import traceback
+
             self.error_signal.emit(f"推理失败: {e}\n{traceback.format_exc()}")
-        finally:
-            if self._tts:
-                self._tts.gr_progress = None
 
     def unload_model(self):
         """卸载模型，释放显存"""
         with QMutexLocker(self._mutex):
-            if self._tts:
-                del self._tts
-                self._tts = None
-                self._model_dir = ""
+            self._shutdown_engine()
+            self._model_dir = ""
+            self._device = "未加载"
 
-                # 尝试释放 CUDA 缓存
+    def _ensure_engine_started(self) -> None:
+        if self._engine_proc is not None and self._engine_proc.poll() is None:
+            return
+
+        paths = get_runtime_paths()
+        if not os.path.exists(paths.venv_python):
+            raise RuntimeError("独立 venv 不存在")
+        if not os.path.exists(paths.engine_worker):
+            raise RuntimeError("找不到独立引擎脚本")
+
+        env = os.environ.copy()
+        source_dir = os.path.join(paths.repo_root, "Source")
+        old_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = source_dir if not old_pp else (source_dir + os.pathsep + old_pp)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        hf_cache = os.path.join(paths.repo_root, "checkpoints", "hf_cache")
+        env["HF_HOME"] = hf_cache
+        env["HF_HUB_CACHE"] = hf_cache
+
+        creation_flags = 0x08000000 if sys.platform == "win32" else 0
+        self._engine_proc = subprocess.Popen(
+            [paths.venv_python, paths.engine_worker],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+            creationflags=creation_flags,
+        )
+
+        assert self._engine_proc.stdout is not None
+        # 启动后第一条应该是 ready；若不是，继续尝试读取几行。
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            line = self._engine_proc.stdout.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line.strip())
+            except Exception:
+                continue
+            if msg.get("type") == "ready":
+                break
+
+        # 后台清空 stderr，避免缓冲区写满导致卡死
+        if self._engine_proc.stderr is not None:
+            self._engine_stderr_thread = threading.Thread(
+                target=self._drain_engine_stderr,
+                args=(self._engine_proc.stderr,),
+                daemon=True,
+            )
+            self._engine_stderr_thread.start()
+
+    def _drain_engine_stderr(self, stderr_pipe):
+        for line in stderr_pipe:
+            if not line:
+                break
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            self._engine_stderr_tail.append(line)
+            if len(self._engine_stderr_tail) > 50:
+                self._engine_stderr_tail = self._engine_stderr_tail[-50:]
+
+    def _send_cmd(self, cmd: str, payload: dict) -> None:
+        self._ensure_engine_started()
+        assert self._engine_proc is not None
+        assert self._engine_proc.stdin is not None
+
+        self._engine_proc.stdin.write(json.dumps({"cmd": cmd, "payload": payload}, ensure_ascii=False) + "\n")
+        self._engine_proc.stdin.flush()
+
+    def _wait_for_result(self, ok_types: set[str], timeout: float) -> dict:
+        assert self._engine_proc is not None
+        assert self._engine_proc.stdout is not None
+
+        end = time.time() + timeout
+        while time.time() < end:
+            line = self._engine_proc.stdout.readline()
+            if not line:
+                rc = self._engine_proc.poll()
+                if rc is not None:
+                    tail = "\n".join(self._engine_stderr_tail[-15:])
+                    raise RuntimeError(f"引擎子进程已退出 (exit={rc})\n{tail}")
+                time.sleep(0.05)
+                continue
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "progress":
                 try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    v = float(msg.get("value") or 0.0)
+                except Exception:
+                    v = 0.0
+                desc = msg.get("desc") or ""
+                mapped = 0.1 + max(0.0, min(1.0, v)) * 0.8
+                self.update_progress_signal.emit(mapped, desc)
+                continue
+
+            if msg_type == "error":
+                raise RuntimeError(msg.get("message") or "引擎返回错误")
+
+            if msg_type in ok_types:
+                return msg
+
+        raise RuntimeError("等待引擎响应超时")
+
+    def _shutdown_engine(self) -> None:
+        proc = self._engine_proc
+        if proc is None:
+            return
+
+        try:
+            if proc.poll() is None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(json.dumps({"cmd": "shutdown", "payload": {}}, ensure_ascii=False) + "\n")
+                    proc.stdin.flush()
                 except Exception:
                     pass
+        finally:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+
+            self._engine_proc = None

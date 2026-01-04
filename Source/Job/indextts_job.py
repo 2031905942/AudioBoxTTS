@@ -105,9 +105,35 @@ class IndexTTSJob(BaseJob):
             self._utility = IndexTTSUtility()
             self._is_model_loaded = False
 
-        # 连接信号
+        # 连接信号（避免重复 connect 导致同一槽函数被触发多次）
+        try:
+            self.load_model_signal.disconnect(self._utility.load_model)
+        except Exception:
+            pass
+        try:
+            self.synthesize_signal.disconnect(self._utility.synthesize)
+        except Exception:
+            pass
+
         self.load_model_signal.connect(self._utility.load_model)
         self.synthesize_signal.connect(self._utility.synthesize)
+
+        try:
+            self._utility.update_progress_signal.disconnect(self._on_progress_update)
+        except Exception:
+            pass
+        try:
+            self._utility.error_signal.disconnect(self._on_error)
+        except Exception:
+            pass
+        try:
+            self._utility.generated_signal.disconnect(self._on_generated)
+        except Exception:
+            pass
+        try:
+            self._utility.model_loaded_signal.disconnect(self._on_model_loaded)
+        except Exception:
+            pass
 
         self._utility.update_progress_signal.connect(self._on_progress_update)
         self._utility.error_signal.connect(self._on_error)

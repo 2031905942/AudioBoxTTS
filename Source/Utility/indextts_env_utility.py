@@ -1,80 +1,42 @@
-"""
-IndexTTS2 环境依赖安装工具
+"""IndexTTS2 独立环境安装/卸载工具。
 
+目标：
+- GUI 主环境不安装任何 IndexTTS2 重依赖；
+- IndexTTS2 依赖安装在 Runtime/IndexTTS2/.venv；
+- 安装使用 uv（更稳定）；
+- 卸载为删除整个 venv 目录。
 """
+
 import os
+import shutil
 import subprocess
 import sys
+import time
 from typing import Optional, List, Tuple
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from Source.Utility.indextts_runtime_utility import ensure_runtime_pyproject, get_runtime_paths
 
-# IndexTTS2 完整依赖列表（基于 pyproject.toml）
-# 注意：某些依赖如 cython, keras, tensorboard, opencv 等仅用于训练，推理时不需要
-CORE_DEPENDENCIES = [
-    # === PyTorch 核心（版本会根据 CUDA/CPU 自动调整） ===
-    "torch==2.8.0",
-    "torchaudio==2.8.0",
-    
-    # === Transformers 和加速 ===
-    "transformers==4.52.1",
-    "accelerate==1.8.1",
-    "tokenizers==0.21.0",
-    
-    # === 音频处理 ===
-    "librosa==0.10.2.post1",
-    "descript-audiotools==0.7.2",
-    "ffmpeg-python==0.2.0",
-    
-    # === 深度学习工具 ===
-    "safetensors==0.5.2",
-    "einops>=0.8.1",
-    "omegaconf>=2.3.0",
-    
-    # === NLP 和文本处理 ===
-    "sentencepiece>=0.2.1",
-    "jieba==0.42.1",
-    "cn2an==0.5.22",
-    "g2p-en==2.1.0",
-    "pypinyin",
-    "wetext>=0.0.9",  # Windows/Mac 文本处理
-    
-    # === 数据处理 ===
-    "numpy==1.26.2",
-    "numba==0.58.1",
-    "pandas>=2.0.0",
-    
-    # === 配置和工具 ===
-    "json5==0.10.0",
-    "munch==4.0.0",
-    "tqdm>=4.67.1",
-    
-    # === 模型下载 ===
-    "huggingface_hub",
-    "modelscope==1.27.0",
-]
 
-# PyTorch CUDA 索引 URL
-PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
-PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-
-# 国内镜像
 PYPI_MIRRORS = {
     "aliyun": "https://mirrors.aliyun.com/pypi/simple",
     "tsinghua": "https://pypi.tuna.tsinghua.edu.cn/simple",
     "default": "https://pypi.org/simple",
 }
 
-# 需要卸载的 AI 专用依赖列表
-# 注意：我们会动态扫描并卸载 nvidia-* 和 triton 等大型依赖
-UNINSTALL_PACKAGES = [
-    "torch", "torchaudio", "transformers", "accelerate", "tokenizers",
-    "librosa", "descript-audiotools", "ffmpeg-python",
-    "safetensors", "einops", "omegaconf",
-    "sentencepiece", "jieba", "cn2an", "g2p-en", "wetext",
-    "numba", "munch", "huggingface_hub", "modelscope",
-    "scipy", "scikit-learn", "pandas", "matplotlib", "pillow", "triton"
+
+_CHECK_IMPORTS = [
+    ("torch", "torch"),
+    ("torchaudio", "torchaudio"),
+    ("transformers", "transformers"),
+    ("accelerate", "accelerate"),
+    ("librosa", "librosa"),
+    ("omegaconf", "omegaconf"),
+    ("sentencepiece", "sentencepiece"),
+    ("safetensors", "safetensors"),
+    ("huggingface_hub", "huggingface_hub"),
+    ("modelscope", "modelscope"),
 ]
 
 
@@ -95,6 +57,28 @@ class IndexTTSEnvUtility(QObject):
         """取消安装"""
         self._is_cancelled = True
 
+    def _ensure_uv_installed(self) -> None:
+        """确保 GUI 主环境里可用 uv（仅工具本身，非 torch 等重依赖）。"""
+        if self._is_cancelled:
+            raise RuntimeError("安装已取消")
+
+        creation_flags = 0x08000000 if sys.platform == "win32" else 0
+        check = subprocess.run(
+            [self._python_path, "-m", "uv", "--version"],
+            capture_output=True,
+            text=True,
+            creationflags=creation_flags,
+        )
+
+        if check.returncode == 0:
+            ver = (check.stdout or "").strip()
+            if ver:
+                self.log_signal.emit(f"uv: {ver}")
+            return
+
+        self.log_signal.emit("未检测到 uv，开始安装 uv（仅工具，不含 torch 等）...")
+        self._run_cmd_stream([self._python_path, "-m", "pip", "install", "-U", "uv"])
+
     @staticmethod
     def get_python_path() -> str:
         """获取当前 Python 解释器路径"""
@@ -102,46 +86,29 @@ class IndexTTSEnvUtility(QObject):
 
     @staticmethod
     def check_full_env_status() -> Tuple[bool, str, List[str]]:
-        """检查完整环境状态 (子进程安全检测)
-        
-        Returns:
-            (is_ready, message, missing_list)
-        """
-        import subprocess
-        import sys
+        """检查 IndexTTS2 独立 venv 是否就绪（子进程安全检测）。"""
         import json
-        
-        # 完整的检测脚本，一次性检查所有依赖和 CUDA
+
+        paths = get_runtime_paths()
+        if not os.path.exists(paths.venv_python):
+            missing = [pkg_name for _, pkg_name in _CHECK_IMPORTS]
+            return False, "未安装 IndexTTS2 独立环境", missing
+
         check_script = """
-import sys
 import importlib.util
 import json
 
-deps = [
-    ("torch", "torch"),
-    ("torchaudio", "torchaudio"),
-    ("transformers", "transformers"),
-    ("accelerate", "accelerate"),
-    ("librosa", "librosa"),
-    ("omegaconf", "omegaconf"),
-    ("sentencepiece", "sentencepiece"),
-    ("safetensors", "safetensors"),
-    ("huggingface_hub", "huggingface_hub"),
-]
-
+deps = %s
 missing = []
+
 for import_name, pkg_name in deps:
     try:
         if importlib.util.find_spec(import_name) is None:
             missing.append(pkg_name)
-    except:
+    except Exception:
         missing.append(pkg_name)
 
-result = {
-    "missing": missing,
-    "cuda_available": False,
-    "cuda_name": ""
-}
+result = {"missing": missing, "cuda_available": False, "cuda_name": ""}
 
 if not missing:
     try:
@@ -149,284 +116,251 @@ if not missing:
         if torch.cuda.is_available():
             result["cuda_available"] = True
             result["cuda_name"] = torch.cuda.get_device_name(0)
-    except:
+    except Exception:
         pass
 
-print(json.dumps(result))
-"""
+print(json.dumps(result, ensure_ascii=False))
+""" % (repr(_CHECK_IMPORTS))
+
         try:
-            creation_flags = 0x08000000 if sys.platform == 'win32' else 0
+            creation_flags = 0x08000000 if sys.platform == "win32" else 0
             proc = subprocess.run(
-                [sys.executable, "-c", check_script],
+                [paths.venv_python, "-c", check_script],
                 capture_output=True,
                 text=True,
-                timeout=10,  # 10秒超时
-                creationflags=creation_flags
+                timeout=15,
+                creationflags=creation_flags,
             )
-            
+
             if proc.returncode != 0:
-                return False, "环境检测脚本执行失败 (Python 环境异常)", []
-                
-            try:
-                data = json.loads(proc.stdout.strip())
-            except json.JSONDecodeError:
-                return False, "环境检测返回数据格式错误", []
-                
+                return False, "独立环境检测失败（Python/依赖异常）", []
+
+            data = json.loads((proc.stdout or "").strip() or "{}")
             missing = data.get("missing", [])
-            
+
             if missing:
-                return False, f"缺少依赖: {', '.join(missing[:3])}{'...' if len(missing)>3 else ''}", missing
-            
-            cuda_msg = f"CUDA 可用: {data.get('cuda_name', 'Unknown')}" if data.get('cuda_available') else "CUDA 不可用"
-            return True, f"环境就绪 ({cuda_msg})", []
-            
+                return False, f"缺少依赖: {', '.join(missing[:3])}{'...' if len(missing) > 3 else ''}", missing
+
+            cuda_msg = (
+                f"CUDA 可用: {data.get('cuda_name', 'Unknown')}"
+                if data.get("cuda_available")
+                else "CUDA 不可用"
+            )
+            return True, f"环境就绪（独立 venv；{cuda_msg}）", []
+
         except subprocess.TimeoutExpired:
-            return False, "环境检测超时 (系统响应过慢)", []
+            return False, "独立环境检测超时", []
         except Exception as e:
-            return False, f"环境检测异常: {str(e)}", []
+            return False, f"独立环境检测异常: {str(e)}", []
 
     @staticmethod
     def check_cuda_available() -> Tuple[bool, str]:
-        """检查 CUDA 是否可用 (通过子进程，防止崩溃)
-
-        Returns:
-            (是否可用, 描述信息)
-        """
-        import subprocess
-        import sys
+        """检查独立 venv 中 CUDA 是否可用（子进程）。"""
         import re
-        
-        # 使用简短的脚本检测，避免主进程 import torch 导致崩溃
-        check_script = "import torch; print('CUDA_AVAILABLE:', torch.cuda.is_available()); print('DEVICE_NAME:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
-        
+
+        paths = get_runtime_paths()
+        if not os.path.exists(paths.venv_python):
+            return False, "未安装 IndexTTS2 独立环境"
+
+        check_script = (
+            "import torch; "
+            "print('CUDA_AVAILABLE:', torch.cuda.is_available()); "
+            "print('DEVICE_NAME:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+        )
+
         try:
-            # 启动子进程检测
-            # creationflags=0x08000000 (CREATE_NO_WINDOW) 防止弹出黑框
-            creation_flags = 0x08000000 if sys.platform == 'win32' else 0
-            
+            creation_flags = 0x08000000 if sys.platform == "win32" else 0
             result = subprocess.run(
-                [sys.executable, "-c", check_script],
+                [paths.venv_python, "-c", check_script],
                 capture_output=True,
                 text=True,
-                timeout=15,  # 15秒超时
-                creationflags=creation_flags
+                timeout=20,
+                creationflags=creation_flags,
             )
-            
+
             if result.returncode != 0:
-                # 脚本执行失败（可能是 import torch 报错）
-                return False, "PyTorch 环境异常 (无法加载)"
-                
-            output = result.stdout
+                return False, "独立环境 PyTorch 异常（无法加载）"
+
+            output = result.stdout or ""
             if "CUDA_AVAILABLE: True" in output:
-                # 提取设备名
                 match = re.search(r"DEVICE_NAME: (.+)", output)
                 device_name = match.group(1).strip() if match else "Unknown GPU"
                 return True, f"CUDA 可用: {device_name}"
-            else:
-                return False, "CUDA 不可用，将使用 CPU 模式"
-                
+
+            return False, "CUDA 不可用，将使用 CPU 模式"
+
         except subprocess.TimeoutExpired:
-            return False, "环境检测超时 (PyTorch 加载过慢)"
+            return False, "环境检测超时（PyTorch 加载过慢）"
         except Exception as e:
             return False, f"环境检测失败: {str(e)}"
 
     @staticmethod
     def check_dependencies_installed() -> Tuple[bool, List[str]]:
-        """检查核心依赖是否已安装
-
-        Returns:
-            (是否全部安装, 缺失的包列表)
-        """
-        import importlib.util
-        missing = []
-        check_packages = [
-            ("torch", "torch"),
-            ("torchaudio", "torchaudio"),
-            ("transformers", "transformers"),
-            ("accelerate", "accelerate"),
-            ("librosa", "librosa"),
-            ("omegaconf", "omegaconf"),
-            ("sentencepiece", "sentencepiece"),
-            ("safetensors", "safetensors"),
-            ("huggingface_hub", "huggingface_hub"),
-        ]
-
-        for import_name, package_name in check_packages:
-            if importlib.util.find_spec(import_name) is None:
-                missing.append(package_name)
-
-        return len(missing) == 0, missing
+        """检查独立 venv 是否安装完毕（通过子进程）。"""
+        is_ready, _, missing = IndexTTSEnvUtility.check_full_env_status()
+        return is_ready, missing
 
     @Slot(bool, str)
     def install_dependencies(self, use_cuda: bool = True, mirror: str = "default"):
-        """安装依赖
-
-        Args:
-            use_cuda: 是否安装 CUDA 版本的 PyTorch
-            mirror: PyPI 镜像源 (aliyun/tsinghua/default)
-        """
+        """安装 IndexTTS2 独立环境（Runtime/IndexTTS2/.venv）。"""
         self._is_cancelled = False
 
         try:
-            self.progress_signal.emit(0.0, "准备安装环境...")
-            self.log_signal.emit(f"Python 路径: {self._python_path}")
+            self._ensure_uv_installed()
+            ensure_runtime_pyproject()
+            paths = get_runtime_paths()
 
-            # 确定 pip 索引
+            self.progress_signal.emit(0.02, "准备独立环境...")
+            self.log_signal.emit(f"GUI Python: {self._python_path}")
+            self.log_signal.emit(f"Runtime: {paths.runtime_root}")
+
             pypi_index = PYPI_MIRRORS.get(mirror, PYPI_MIRRORS["default"])
-            pytorch_index = PYTORCH_CUDA_INDEX if use_cuda else PYTORCH_CPU_INDEX
+            torch_backend = "cu128" if use_cuda else "cpu"
+            self.log_signal.emit(f"PyPI 源: {pypi_index}")
+            self.log_signal.emit(f"PyTorch 后端: {torch_backend}")
 
-            self.log_signal.emit(f"PyPI 镜像: {pypi_index}")
-            self.log_signal.emit(f"PyTorch 源: {pytorch_index}")
+            if not os.path.exists(paths.venv_python):
+                self.progress_signal.emit(0.08, "创建独立 venv...")
+                os.makedirs(paths.runtime_root, exist_ok=True)
+                # NOTE: The embedded Python shipped with this app may not include stdlib `venv`.
+                # Use `uv venv` which does not rely on `python -m venv`.
+                self._run_cmd_stream(
+                    [
+                        self._python_path,
+                        "-m",
+                        "uv",
+                        "venv",
+                        paths.venv_dir,
+                        "--python",
+                        self._python_path,
+                        "--no-python-downloads",
+                        "--seed",
+                        "--clear",
+                    ]
+                )
 
-            # 升级 pip
-            self.progress_signal.emit(0.05, "升级 pip...")
-            self._run_pip(["install", "--upgrade", "pip"])
+            self.progress_signal.emit(0.15, "使用 uv 安装/同步依赖（可能需要较长时间）...")
 
-            # 安装 PyTorch（单独处理，因为需要特殊索引）
-            self.progress_signal.emit(0.1, "安装 PyTorch（可能需要几分钟）...")
+            cmd = [
+                self._python_path,
+                "-m",
+                "uv",
+                "pip",
+                "sync",
+                "-vv",
+                paths.pyproject_path,
+                "--python",
+                paths.venv_python,
+                "--torch-backend",
+                torch_backend,
+                "--no-python-downloads",
+                "--default-index",
+                pypi_index,
+            ]
+            self._run_cmd_stream(cmd)
 
-            torch_packages = ["torch==2.8.0", "torchaudio==2.8.0"]
-            result = self._run_pip([
-                "install",
-                *torch_packages,
-                "--index-url", pytorch_index,
-            ])
-
-            if not result:
-                self.error_signal.emit("PyTorch 安装失败")
-                return
-
-            # 安装其他依赖
-            other_deps = [d for d in CORE_DEPENDENCIES if not d.startswith("torch")]
-            total = len(other_deps)
-
-            for i, dep in enumerate(other_deps):
-                if self._is_cancelled:
-                    self.error_signal.emit("安装已取消")
-                    return
-
-                progress = 0.2 + 0.7 * (i / total)
-                self.progress_signal.emit(progress, f"安装 {dep}...")
-
-                result = self._run_pip([
-                    "install", dep,
-                    "-i", pypi_index,
-                    "--trusted-host", pypi_index.split("//")[1].split("/")[0],
-                ])
-
-                if not result:
-                    self.log_signal.emit(f"警告: {dep} 安装可能失败，继续...")
-
-            # 验证安装
-            self.progress_signal.emit(0.95, "验证安装...")
+            self.progress_signal.emit(0.95, "验证独立环境...")
             is_ok, missing = self.check_dependencies_installed()
-
             if is_ok:
-                self.progress_signal.emit(1.0, "安装完成！")
+                self.progress_signal.emit(1.0, "独立环境安装完成")
                 self.finished_signal.emit(True)
             else:
-                self.error_signal.emit(f"部分依赖安装失败: {', '.join(missing)}")
+                self.error_signal.emit(f"部分依赖缺失: {', '.join(missing)}")
                 self.finished_signal.emit(False)
 
         except Exception as e:
             import traceback
+
             self.error_signal.emit(f"安装失败: {e}\n{traceback.format_exc()}")
             self.finished_signal.emit(False)
 
     @Slot()
     def uninstall_dependencies(self):
-        """卸载依赖"""
+        """卸载 IndexTTS2：删除 Runtime/IndexTTS2/.venv。"""
         self._is_cancelled = False
-        
-        try:
-            self.progress_signal.emit(0.0, "正在扫描已安装的包...")
-            self.log_signal.emit(f"Python 路径: {self._python_path}")
-            
-            # 1. 获取所有已安装的包
-            installed_packages = []
-            try:
-                proc = subprocess.run(
-                    [self._python_path, "-m", "pip", "freeze"],
-                    capture_output=True, text=True, encoding='utf-8'
-                )
-                if proc.returncode == 0:
-                    # 解析 freeze 输出 (package==version)
-                    for line in proc.stdout.splitlines():
-                        if "==" in line:
-                            installed_packages.append(line.split("==")[0].lower())
-                        elif "@" in line: # 处理 url 安装的情况
-                            pass 
-            except Exception as e:
-                self.log_signal.emit(f"扫描包失败: {e}")
 
-            # 2. 构建完整的卸载列表
-            to_uninstall = set(UNINSTALL_PACKAGES)
-            
-            # 动态添加 nvidia-* 包 (这些通常很大，且不会被自动卸载)
-            for pkg in installed_packages:
-                if pkg.startswith("nvidia-") or pkg.startswith("triton"):
-                    to_uninstall.add(pkg)
-            
-            # 转换为列表并排序
-            final_list = sorted(list(to_uninstall))
-            
-            total = len(final_list)
-            self.progress_signal.emit(0.1, f"发现 {total} 个相关包需要卸载...")
-            
-            for i, pkg in enumerate(final_list):
-                if self._is_cancelled:
-                    self.error_signal.emit("卸载已取消")
-                    return
-                
-                progress = 0.1 + 0.9 * (i / total)
-                self.progress_signal.emit(progress, f"正在卸载 {pkg}...")
-                
-                # 使用 -y 自动确认
-                self._run_pip(["uninstall", "-y", pkg])
-            
-            self.progress_signal.emit(1.0, "卸载完成")
+        try:
+            paths = get_runtime_paths()
+            if not os.path.exists(paths.venv_dir):
+                self.progress_signal.emit(1.0, "未发现独立 venv，无需卸载")
+                self.finished_signal.emit(True)
+                return
+
+            self.progress_signal.emit(0.1, "正在删除独立 venv...")
+            self._safe_rmtree(paths.venv_dir)
+            self.progress_signal.emit(1.0, "卸载完成（已删除独立 venv）")
             self.finished_signal.emit(True)
-            
+
         except Exception as e:
             import traceback
+
             self.error_signal.emit(f"卸载失败: {e}\n{traceback.format_exc()}")
             self.finished_signal.emit(False)
 
-    def _run_pip(self, args: List[str]) -> bool:
-        """运行 pip 命令
-
-        Returns:
-            是否成功
-        """
-        cmd = [self._python_path, "-m", "pip"] + args
-
+    def _run_cmd_stream(self, cmd: List[str]) -> None:
+        """运行命令并实时回传输出；支持取消。"""
         self.log_signal.emit(f"执行: {' '.join(cmd)}")
-        print(f"执行: {' '.join(cmd)}")
 
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+        creation_flags = 0x08000000 if sys.platform == "win32" else 0
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
 
-            # 实时输出日志
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    self.log_signal.emit(line)
-                    print(line)
+        assert process.stdout is not None
+        last_lines: List[str] = []
+        for line in process.stdout:
+            if self._is_cancelled:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                raise RuntimeError("操作已取消")
 
-            process.wait()
-            return process.returncode == 0
+            line = line.rstrip("\n")
+            if line.strip():
+                self.log_signal.emit(line)
+                last_lines.append(line)
+                if len(last_lines) > 80:
+                    last_lines.pop(0)
 
-        except Exception as e:
-            self.log_signal.emit(f"命令执行失败: {e}")
-            print(f"命令执行失败: {e}")
-            return False
+        rc = process.wait()
+        if rc != 0:
+            tail = "\n".join(last_lines[-30:])
+            if tail.strip():
+                raise RuntimeError(f"命令执行失败 (exit={rc})\n\n--- last output ---\n{tail}")
+            raise RuntimeError(f"命令执行失败 (exit={rc})")
+
+    def _safe_rmtree(self, path: str) -> None:
+        if not os.path.exists(path):
+            return
+
+        def _onerror(func, p, exc_info):
+            try:
+                os.chmod(p, 0o777)
+            except Exception:
+                pass
+            try:
+                func(p)
+            except Exception:
+                pass
+
+        last_err: Optional[Exception] = None
+        for _ in range(5):
+            try:
+                shutil.rmtree(path, onerror=_onerror)
+                return
+            except Exception as e:
+                last_err = e
+                time.sleep(0.5)
+
+        if last_err:
+            raise last_err
 
     @staticmethod
     def get_install_size_estimate() -> str:

@@ -128,6 +128,8 @@ class AIVoiceInterface(QFrame):
 
         # 环境检测状态
         self._env_check_pending = False
+        self._env_check_request_id = 0
+        self._env_check_worker = None
         
         # 环境/模型是否就绪
         self._env_ready = False
@@ -663,15 +665,58 @@ class AIVoiceInterface(QFrame):
 
     def _start_async_env_check(self, save_dir: str):
         """异步检查环境"""
+        if self._env_check_pending:
+            return
+
+        self._env_check_pending = True
+        self._env_check_request_id += 1
+        request_id = self._env_check_request_id
+
         self.download_btn.setEnabled(False)
         self.download_btn.setText("正在检测环境...")
-        
+
         worker = EnvCheckWorker()
-        worker.signals.finished.connect(lambda is_ready, msg: self._on_env_check_finished(is_ready, msg, save_dir))
+        # Keep a strong reference to avoid Python GC interrupting signal delivery.
+        try:
+            worker.setAutoDelete(False)
+        except Exception:
+            pass
+        self._env_check_worker = worker
+
+        worker.signals.finished.connect(
+            lambda is_ready, msg: self._on_env_check_finished(request_id, is_ready, msg, save_dir)
+        )
         QThreadPool.globalInstance().start(worker)
 
-    def _on_env_check_finished(self, is_ready: bool, msg: str, save_dir: str):
+        # Watchdog: avoid being stuck forever if worker is blocked.
+        QTimer.singleShot(20000, lambda: self._on_env_check_timeout(request_id))
+
+    def _on_env_check_timeout(self, request_id: int):
+        if not self._env_check_pending:
+            return
+        if request_id != self._env_check_request_id:
+            return
+
+        self._env_check_pending = False
+        self._env_check_worker = None
+        self.download_btn.setEnabled(True)
+        self._check_env_and_model()
+
+        InfoBar.warning(
+            title="环境检测超时",
+            content="环境检测耗时过长，请稍后重试或直接点击“安装并下载”。",
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=4500
+        )
+
+    def _on_env_check_finished(self, request_id: int, is_ready: bool, msg: str, save_dir: str):
         """环境检测完成回调"""
+        if request_id != self._env_check_request_id:
+            return
+
+        self._env_check_pending = False
+        self._env_check_worker = None
         self.download_btn.setEnabled(True)
         # 检查当前状态（如果文件已存在，则更新为删除模式；否则保持下载模式）
         self._check_env_and_model()
@@ -690,12 +735,17 @@ class AIVoiceInterface(QFrame):
                 self._pending_save_dir = save_dir
                 
                 # 连接信号，等待环境安装完成
-                # 先断开可能的旧连接
                 try:
-                    self._main_window.indextts_env_job.job_completed.disconnect(self._on_env_job_finished)
-                except:
-                    pass
-                self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
+                    from PySide6.QtCore import Qt
+
+                    self._main_window.indextts_env_job.job_completed.connect(
+                        self._on_env_job_finished, Qt.ConnectionType.UniqueConnection
+                    )
+                except Exception:
+                    try:
+                        self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
+                    except Exception:
+                        pass
                 
                 # 启动环境安装
                 self._main_window.indextts_env_job.install_action()
@@ -706,12 +756,6 @@ class AIVoiceInterface(QFrame):
 
     def _on_env_job_finished(self, success: bool):
         """环境安装完成回调"""
-        # 断开信号
-        try:
-            self._main_window.indextts_env_job.job_completed.disconnect(self._on_env_job_finished)
-        except:
-            pass
-            
         if success:
             # 环境安装成功，继续下载模型
             if hasattr(self, '_pending_save_dir') and self._pending_save_dir:
@@ -778,7 +822,7 @@ class AIVoiceInterface(QFrame):
         res = msg.exec()
         
         if choice[0] == 'delete_env':
-            QTimer.singleShot(100, lambda: self._delete_model_files(save_dir))
+            QTimer.singleShot(100, self._delete_env_only)
             return
 
         if res:
@@ -787,6 +831,36 @@ class AIVoiceInterface(QFrame):
             self._main_window.indextts_download_job.download_action(
                 save_dir, use_mirror=use_mirror
             )
+
+    def _delete_env_only(self):
+        """仅删除 IndexTTS2 独立环境（Runtime/IndexTTS2/.venv），不删除模型文件。"""
+        # 检查模型是否已加载
+        if self._main_window.indextts_job.is_model_loaded:
+            InfoBar.warning(
+                title="请先卸载模型",
+                content="模型正在使用中，请先卸载模型后再删除环境依赖",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3000
+            )
+            return
+
+        msg = MessageBox(
+            "删除环境依赖",
+            "确定要删除 IndexTTS2 独立环境吗？\n\n"
+            "将删除: Runtime/IndexTTS2/.venv\n\n"
+            "模型文件（checkpoints）不会被删除。",
+            self._main_window
+        )
+        msg.yesButton.setText("确认删除")
+        msg.cancelButton.setText("取消")
+
+        if not msg.exec():
+            return
+
+        self._main_window.indextts_env_job.uninstall_action()
+        self._env_ready = False
+        self._update_generate_btn_state()
 
     def _delete_model_files(self, save_dir: str):
         """删除模型文件"""
@@ -806,7 +880,7 @@ class AIVoiceInterface(QFrame):
             "删除依赖和模型",
             f"确定要删除 AI 语音相关的依赖和模型文件吗？\n\n"
             f"1. 删除模型目录: {save_dir}\n"
-            f"2. 卸载 Python 依赖 (torch, transformers 等)\n\n"
+            f"2. 删除 IndexTTS2 独立环境 (Runtime/IndexTTS2/.venv)\n\n"
             f"此操作将删除约 5GB 的文件，且不可撤销。",
             self._main_window
         )
@@ -919,16 +993,6 @@ class AIVoiceInterface(QFrame):
             self._env_ready = False
             self._update_generate_btn_state()
 
-        except Exception as e:
-            progress_window.close()
-            InfoBar.error(
-                title="删除失败",
-                content=str(e),
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=5000
-            )
-
     def _update_download_btn_state(self, is_complete: bool):
         """更新下载/删除按钮状态"""
         if is_complete:
@@ -1000,6 +1064,31 @@ class AIVoiceInterface(QFrame):
         Returns:
             bool: 环境是否就绪
         """
+        # 1) 检查 IndexTTS2 独立 venv 是否就绪
+        try:
+            from Source.Job.indextts_env_job import IndexTTSEnvJob
+
+            is_ready, msg = IndexTTSEnvJob.check_env_ready()
+            if not is_ready:
+                InfoBar.warning(
+                    title="环境未就绪",
+                    content=msg,
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=4500
+                )
+                return False
+        except Exception as e:
+            InfoBar.error(
+                title="环境检测失败",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4500
+            )
+            return False
+
+        # 2) 检查模型文件是否存在
         model_dir = IndexTTSUtility.get_default_model_dir()
         is_complete, _ = IndexTTSUtility.check_model_files(model_dir)
         
@@ -1301,13 +1390,26 @@ class AIVoiceInterface(QFrame):
 
     def _check_env_and_model(self):
         """检查环境和模型状态"""
+        # 注意：此方法会在界面 refresh() 时被调用，必须保持非阻塞。
+        # 这里只做“是否存在独立 venv python”的快速判断；更完整的依赖检查
+        # 由 EnvCheckWorker 在后台线程完成。
+        env_ok = False
+        try:
+            from Source.Utility.indextts_runtime_utility import get_runtime_paths
+
+            env_ok = bool(os.path.exists(get_runtime_paths().venv_python))
+        except Exception:
+            env_ok = False
+
         # 检查模型文件
         model_dir = IndexTTSUtility.get_default_model_dir()
         is_complete, _ = IndexTTSUtility.check_model_files(model_dir)
         
-        # 更新下载/删除按钮状态
-        self._update_download_btn_state(is_complete)
-        self._env_ready = is_complete
+        # 更新下载/删除按钮状态（若正在异步检测，不覆盖按钮文案/禁用状态）
+        if not self._env_check_pending:
+            self._update_download_btn_state(is_complete)
+            self.download_btn.setEnabled(True)
+        self._env_ready = bool(env_ok and is_complete)
 
         # 更新模型状态
         self._update_model_status()

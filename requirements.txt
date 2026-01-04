@@ -23,6 +23,5 @@ waapi-client
 webdav4
 
 # IndexTTS2 依赖说明：
-# IndexTTS2 (AI语音) 的依赖通过 install_indextts_deps.py 脚本安装
-# 主要包括: torch, torchaudio, transformers, accelerate, librosa 等
-# 详见 INDEXTTS_README.md
+# IndexTTS2 (AI语音) 的重依赖不安装到 GUI 主环境。
+# 依赖由 Source/Utility/indextts_env_utility.py 使用 uv 安装到 Runtime/IndexTTS2/.venv。

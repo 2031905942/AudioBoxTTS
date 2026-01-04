@@ -3,6 +3,8 @@ IndexTTS2 环境安装 Job
 
 负责线程管理、进度窗口。
 """
+import os
+import time
 from typing import Optional
 
 from PySide6.QtCore import Signal
@@ -25,11 +27,30 @@ class IndexTTSEnvJob(BaseJob):
         self._utility: Optional[IndexTTSEnvUtility] = None
         self._log_lines: list = []
         self._current_operation = "install"  # install or uninstall
+        self._log_file_path: str | None = None
+        self._had_error: bool = False
 
     @property
     def install_log(self) -> str:
         """获取安装日志"""
         return "\n".join(self._log_lines[-100:])  # 最近 100 行
+
+    @property
+    def install_log_path(self) -> str | None:
+        """最近一次任务的日志文件路径（如有）。"""
+        return self._log_file_path
+
+    def _begin_log_file(self):
+        """为本次操作初始化日志文件（落盘，便于回溯）。"""
+        try:
+            # Keep it under repo root to make it easy to find.
+            log_dir = os.path.join(self.main_window.root_path, "temp_output", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            op = self._current_operation
+            self._log_file_path = os.path.join(log_dir, f"indextts_env_{op}_{ts}.log")
+        except Exception:
+            self._log_file_path = None
 
     def install_action(self, use_cuda: bool = True, mirror: str = "default"):
         """开始安装（UI 调用入口）
@@ -44,6 +65,8 @@ class IndexTTSEnvJob(BaseJob):
 
         self._current_operation = "install"
         self._log_lines.clear()
+        self._had_error = False
+        self._begin_log_file()
         self._create_utility()
         self._utility.moveToThread(self.worker_thread)
 
@@ -60,6 +83,8 @@ class IndexTTSEnvJob(BaseJob):
 
         self._current_operation = "uninstall"
         self._log_lines.clear()
+        self._had_error = False
+        self._begin_log_file()
         self._create_utility()
         self._utility.moveToThread(self.worker_thread)
 
@@ -101,14 +126,22 @@ class IndexTTSEnvJob(BaseJob):
 
     def _on_error(self, message: str):
         """错误回调"""
+        self._had_error = True
         self.worker_thread.quit()
         op_name = "环境安装" if self._current_operation == "install" else "环境卸载"
+        if self._log_file_path:
+            message = f"{message}\n\n日志已保存到:\n{self._log_file_path}"
         self.job_finish(op_name, message, "error")
         self.job_completed.emit(False)
 
     def _on_finished(self, success: bool):
         """任务完成"""
         self.worker_thread.quit()
+
+        # If an explicit error was already handled (and UI notified), avoid
+        # showing a second "warning" result.
+        if not success and self._had_error:
+            return
         
         op_name = "环境安装" if self._current_operation == "install" else "环境卸载"
         
@@ -116,7 +149,14 @@ class IndexTTSEnvJob(BaseJob):
             msg = "IndexTTS2 环境安装成功！" if self._current_operation == "install" else "依赖卸载成功！"
             self.job_finish(op_name, msg, "success")
         else:
-            msg = "部分依赖安装失败，请查看日志" if self._current_operation == "install" else "部分依赖卸载失败"
+            if self._current_operation == "install":
+                msg = "部分依赖安装失败，请查看日志"
+                if self._log_file_path:
+                    msg = f"{msg}\n\n日志已保存到:\n{self._log_file_path}"
+            else:
+                msg = "部分依赖卸载失败"
+                if self._log_file_path:
+                    msg = f"{msg}\n\n日志已保存到:\n{self._log_file_path}"
             self.job_finish(op_name, msg, "warning")
             
         self.job_completed.emit(success)
@@ -124,7 +164,22 @@ class IndexTTSEnvJob(BaseJob):
     def _on_log(self, line: str):
         """日志输出"""
         self._log_lines.append(line)
-        # 可以在这里更新 UI 显示日志
+        if self._progress_bar_window:
+            try:
+                self._progress_bar_window.set_text(line)
+            except Exception:
+                pass
+        try:
+            print(f"[IndexTTSEnvJob] {line}", flush=True)
+        except Exception:
+            pass
+        if self._log_file_path:
+            try:
+                with open(self._log_file_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(line)
+                    f.write("\n")
+            except Exception:
+                pass
 
     @staticmethod
     def check_env_ready() -> tuple[bool, str]:
