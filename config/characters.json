@@ -1,13 +1,22 @@
 {
   "characters": [
     {
-      "id": "8f500caf-4bce-4350-a96d-509b430d1f60",
-      "name": "到底",
+      "id": "0e3bdc12-9ce7-4362-a842-532c08fdf57d",
+      "name": "小好",
       "avatar_path": "",
-      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
       "last_output_dir": "",
       "last_output_filename": "",
-      "created_at": "2025-12-30T14:18:36.995730"
+      "created_at": "2026-01-05T17:09:07.025895"
+    },
+    {
+      "id": "751336d1-2307-4d26-9491-4b72c4381347",
+      "name": "我错了",
+      "avatar_path": "C:/Work/Learning/AudioBoxTTS/Resource/CharacterIcon/累成一滩泥.png",
+      "reference_audio_path": "",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2026-01-05T15:55:05.182584"
     },
     {
       "id": "891b903b-e1b6-47c8-9571-e9b1b0938ba0",
@@ -19,41 +28,41 @@
       "created_at": "2025-12-29T18:56:14.333875"
     },
     {
-      "id": "a727e959-7c98-44eb-85ee-73e9903dc1f4",
-      "name": "哈哈哈",
+      "id": "ce120dca-9a28-4405-b933-10981417f536",
+      "name": "王子",
       "avatar_path": "",
       "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
       "last_output_dir": "",
       "last_output_filename": "",
-      "created_at": "2025-12-29T19:41:10.757601"
+      "created_at": "2026-01-05T15:25:14.436666"
     },
     {
-      "id": "a286fef3-9fa0-4c57-9ae9-91aa2646c6c4",
-      "name": "Hero1001",
+      "id": "305a251f-abeb-4995-a1f1-742ca80698bc",
+      "name": "公主",
       "avatar_path": "",
-      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
-      "last_output_dir": "",
-      "last_output_filename": "",
-      "created_at": "2025-12-30T14:28:56.282039"
-    },
-    {
-      "id": "a3c14f46-b735-4a1c-b04f-b5d95f287d07",
-      "name": "萝莉",
-      "avatar_path": "C:/Work/Learning/AudioBoxTTS/Resource/CharacterIcon/累成一滩泥.png",
       "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
       "last_output_dir": "C:/Users/Admin/Music",
-      "last_output_filename": "萝莉_1767086710.wav",
-      "created_at": "2025-12-29T18:52:51.926591"
+      "last_output_filename": "示例1.wav",
+      "created_at": "2026-01-05T15:26:24.058407"
     },
     {
-      "id": "989949bf-130a-458f-a4c7-1e90e8f3429b",
-      "name": "吃饭",
+      "id": "46d546fb-56c2-4b08-b11a-5fbe062de00f",
+      "name": "小孩",
       "avatar_path": "",
-      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/PVE/Stage1/Dialog/VO Dialog PVE Stage1 22.wav",
-      "last_output_dir": "C:/Users/Admin/Music",
-      "last_output_filename": "吃饭_1767080144.wav",
-      "created_at": "2025-12-30T12:02:56.649613"
+      "reference_audio_path": "C:/Work/burnerTrunk/BurnerWwise/Burner/Originals/Voices/English (US)/Story/Dialog/Drama/HeroCenter/Dialog/VO Dialog Drama HeroCenter 1_1.wav",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2026-01-05T15:26:29.743812"
+    },
+    {
+      "id": "892a721a-6f4c-4c13-b27a-7fc57493711f",
+      "name": "包子",
+      "avatar_path": "",
+      "reference_audio_path": "",
+      "last_output_dir": "",
+      "last_output_filename": "",
+      "created_at": "2026-01-05T19:10:15.305865"
     }
   ],
-  "selected_character_id": "8f500caf-4bce-4350-a96d-509b430d1f60"
+  "selected_character_id": "0e3bdc12-9ce7-4362-a842-532c08fdf57d"
 }

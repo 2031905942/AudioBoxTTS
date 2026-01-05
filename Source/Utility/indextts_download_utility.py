@@ -5,9 +5,14 @@ IndexTTS2 模型下载工具类
 """
 import os
 import sys
+import subprocess
+import json
+import time
 from typing import Optional, Callable, List
 
 from PySide6.QtCore import QObject, Signal, Slot
+
+from Source.Utility.indextts_runtime_utility import get_runtime_paths
 
 # 默认模型仓库
 DEFAULT_REPO_ID = "IndexTeam/IndexTTS-2"
@@ -69,6 +74,308 @@ class IndexTTSDownloadUtility(QObject):
         """取消下载"""
         self._is_cancelled = True
 
+    def _download_via_runtime_venv(
+        self,
+        *,
+        local_dir: str,
+        repo_id: str,
+        use_mirror: bool,
+    ) -> bool:
+        """在 Runtime/IndexTTS2/.venv 中执行下载。
+
+        目的：GUI 主环境保持轻量，不要求安装 huggingface_hub。
+        """
+        paths = get_runtime_paths()
+        if not os.path.exists(paths.venv_python):
+            self.error_signal.emit("未发现 IndexTTS2 独立环境，请先执行：下载依赖和模型 → 安装并下载")
+            return False
+
+        os.makedirs(local_dir, exist_ok=True)
+
+        total_size = float(sum(REQUIRED_FILES.values()) + sum(f[2] for f in EXTERNAL_FILES))
+        downloaded_size = 0.0
+        inflight_mb = 0.0
+
+        # 终端日志节流（避免刷屏）
+        last_print_ts = 0.0
+        last_print_key = ""
+
+        # 子进程脚本：逐个文件下载，并输出 JSON 行协议。
+        # 输出格式：
+        #   {"event": "skip|done|start|progress|error|all_done", "name": "...", "size": 1.23, ...}
+        # 其中 progress 事件额外包含：downloaded_bytes / total_bytes。
+        script_payload = {
+            "repo_id": repo_id,
+            "local_dir": local_dir,
+            "required_files": list(REQUIRED_FILES.items()),
+            "external_files": EXTERNAL_FILES,
+        }
+
+        child_code = r"""
+import os, json, sys, time
+
+payload = json.loads(sys.argv[1])
+repo_id = payload["repo_id"]
+local_dir = payload["local_dir"]
+required_files = payload["required_files"]
+external_files = payload["external_files"]
+
+try:
+    import requests
+except Exception as e:
+    print(json.dumps({"event": "error", "message": f"requests 导入失败: {e}"}, ensure_ascii=False), flush=True)
+    raise
+
+os.makedirs(local_dir, exist_ok=True)
+
+def emit(event, **kw):
+    kw["event"] = event
+    print(json.dumps(kw, ensure_ascii=False), flush=True)
+
+def _head_size(url: str) -> int:
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=30)
+        if resp.status_code >= 400:
+            return 0
+        val = resp.headers.get("Content-Length")
+        return int(val) if val and val.isdigit() else 0
+    except Exception:
+        return 0
+
+def _download(url: str, dest_path: str, size_mb_hint: float, display_name: str) -> None:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+    total_bytes = _head_size(url)
+    existing = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+
+    if total_bytes and existing >= total_bytes:
+        emit("skip", name=display_name, size=float(size_mb_hint))
+        return
+
+    emit("start", name=display_name, size=float(size_mb_hint), total_bytes=int(total_bytes))
+
+    headers = {}
+    mode = "wb"
+    if existing > 0:
+        headers["Range"] = f"bytes={existing}-"
+        mode = "ab"
+
+    resp = requests.get(url, stream=True, allow_redirects=True, timeout=60, headers=headers)
+
+    # HTTP 416: requested range not satisfiable (常见于本地文件大小异常/服务器不接受该 Range)
+    # 处理策略：删除本地文件，从头重新下载。
+    if resp.status_code == 416 and existing > 0:
+        try:
+            resp.close()
+        except Exception:
+            pass
+        try:
+            os.remove(dest_path)
+        except Exception:
+            pass
+        existing = 0
+        headers.pop("Range", None)
+        mode = "wb"
+        resp = requests.get(url, stream=True, allow_redirects=True, timeout=60, headers=headers)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+
+    # 若 Range 被忽略，重新从头写
+    if existing > 0 and resp.status_code == 200:
+        existing = 0
+        mode = "wb"
+
+    downloaded = existing
+    last_emit = 0.0
+    with open(dest_path, mode) as f:
+        for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):
+            if not chunk:
+                continue
+            f.write(chunk)
+            downloaded += len(chunk)
+            now = time.time()
+            if now - last_emit >= 0.5:
+                emit(
+                    "progress",
+                    name=display_name,
+                    size=float(size_mb_hint),
+                    downloaded_bytes=int(downloaded),
+                    total_bytes=int(total_bytes),
+                )
+                last_emit = now
+
+    emit(
+        "progress",
+        name=display_name,
+        size=float(size_mb_hint),
+        downloaded_bytes=int(downloaded),
+        total_bytes=int(total_bytes),
+    )
+
+    if total_bytes and downloaded < total_bytes:
+        raise RuntimeError(f"下载不完整: {downloaded}/{total_bytes} bytes")
+
+    emit("done", name=display_name, size=float(size_mb_hint))
+
+def _resolve_url(base: str, repo: str, filename: str) -> str:
+    # HuggingFace resolve URL (supports large LFS files via redirects)
+    # Example: https://huggingface.co/<repo>/resolve/main/<path>
+    # Mirror:  https://hf-mirror.com/<repo>/resolve/main/<path>
+    return f"{base}/{repo}/resolve/main/{filename}"
+
+hf_base = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+
+for filename, size_mb in required_files:
+    dest = os.path.join(local_dir, filename)
+    url = _resolve_url(hf_base, repo_id, filename)
+    display = filename
+    try:
+        _download(url, dest, float(size_mb), display)
+    except Exception as e:
+        emit("error", message=f"下载 {display} 失败: {e}")
+        raise
+
+for ext_repo_id, filename, size_mb, local_subpath in external_files:
+    target_dir = os.path.join(local_dir, local_subpath)
+    dest = os.path.join(target_dir, filename)
+    url = _resolve_url(hf_base, ext_repo_id, filename)
+    display = f"{ext_repo_id}:{filename}"
+    try:
+        _download(url, dest, float(size_mb), display)
+    except Exception as e:
+        emit("error", message=f"下载 {display} 失败: {e}")
+        raise
+
+emit("all_done")
+"""
+
+        env = os.environ.copy()
+        if use_mirror:
+            env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        else:
+            env.pop("HF_ENDPOINT", None)
+
+        creation_flags = 0x08000000 if sys.platform == "win32" else 0
+        proc = subprocess.Popen(
+            [paths.venv_python, "-c", child_code, json.dumps(script_payload, ensure_ascii=False)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=creation_flags,
+        )
+
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            if self._is_cancelled:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                self.error_signal.emit("下载已取消")
+                return False
+
+            line = (raw or "").strip()
+            if not line:
+                continue
+
+            # 非 JSON 输出直接透传（便于诊断）
+            try:
+                evt = json.loads(line)
+            except Exception:
+                # 兼容子进程偶发的普通输出：显示在进度区域，同时也打印到终端
+                self.progress_signal.emit(0.0, line)
+                print(f"[IndexTTSDownload] {line}")
+                continue
+
+            event = evt.get("event")
+            name = evt.get("name", "")
+            size_mb = float(evt.get("size") or 0.0)
+
+            if event == "error":
+                self.error_signal.emit(str(evt.get("message", "下载失败")))
+                print(f"[IndexTTSDownload] ERROR: {evt.get('message', '下载失败')}")
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                return False
+
+            if event in ("skip", "done"):
+                inflight_mb = 0.0
+                downloaded_size += size_mb
+                frac = 0.05 + 0.9 * (downloaded_size / total_size if total_size > 0 else 1.0)
+                msg = ("跳过已存在" if event == "skip" else "已下载") + f": {name}"
+                self.progress_signal.emit(min(frac, 0.95), msg)
+
+                now = time.time()
+                if now - last_print_ts >= 1.0 or last_print_key != name:
+                    print(f"[IndexTTSDownload] {msg}")
+                    last_print_ts = now
+                    last_print_key = name
+
+                if event == "done":
+                    # 对主仓库文件，尽量仅回传文件名
+                    self.file_downloaded_signal.emit(name.split(":", 1)[-1])
+                continue
+
+            if event == "progress":
+                # 单个大文件下载中：平滑更新进度条
+                total_bytes = int(evt.get("total_bytes") or 0)
+                downloaded_bytes = int(evt.get("downloaded_bytes") or 0)
+
+                if total_bytes > 0:
+                    inflight_mb = size_mb * (downloaded_bytes / total_bytes)
+                    percent = 100.0 * (downloaded_bytes / total_bytes)
+                else:
+                    inflight_mb = downloaded_bytes / (1024 * 1024)
+                    percent = 0.0
+
+                overall = downloaded_size + inflight_mb
+                frac = 0.05 + 0.9 * (overall / total_size if total_size > 0 else 0.0)
+                detail = f"{name}"
+                if percent > 0:
+                    detail += f" ({percent:.1f}%)"
+                self.progress_signal.emit(min(frac, 0.95), f"下载中: {detail}")
+
+                # 终端输出节流
+                now = time.time()
+                if now - last_print_ts >= 2.0:
+                    if total_bytes > 0:
+                        mb_done = downloaded_bytes / (1024 * 1024)
+                        mb_total = total_bytes / (1024 * 1024)
+                        print(f"[IndexTTSDownload] {name}: {mb_done:.0f}/{mb_total:.0f} MB ({percent:.1f}%)")
+                    else:
+                        mb_done = downloaded_bytes / (1024 * 1024)
+                        print(f"[IndexTTSDownload] {name}: {mb_done:.0f} MB")
+                    last_print_ts = now
+                continue
+
+            if event == "start":
+                inflight_mb = 0.0
+                frac = 0.05 + 0.9 * (downloaded_size / total_size if total_size > 0 else 0.0)
+                self.progress_signal.emit(min(frac, 0.95), f"下载中: {name} ({size_mb:.1f} MB)")
+
+                now = time.time()
+                if now - last_print_ts >= 1.0 or last_print_key != name:
+                    print(f"[IndexTTSDownload] 下载开始: {name} ({size_mb:.1f} MB)")
+                    last_print_ts = now
+                    last_print_key = name
+                continue
+
+            if event == "all_done":
+                break
+
+        rc = proc.wait()
+        if rc != 0:
+            self.error_signal.emit(f"下载子进程失败 (exit={rc})，请查看安装日志或重试")
+            return False
+
+        return True
+
     @Slot(str, str, bool)
     def download(self, local_dir: str, repo_id: str = DEFAULT_REPO_ID,
                  use_mirror: bool = False):
@@ -90,97 +397,16 @@ class IndexTTSDownloadUtility(QObject):
             elif "HF_ENDPOINT" in os.environ:
                 del os.environ["HF_ENDPOINT"]
 
-            # 导入 huggingface_hub
-            try:
-                from huggingface_hub import hf_hub_download, snapshot_download
-            except ImportError:
-                self.error_signal.emit(
-                    "huggingface_hub 未安装。\n"
-                    "请运行: pip install huggingface_hub[hf_xet]"
-                )
+            # 关键：模型下载放到 Runtime/IndexTTS2/.venv 里执行，避免要求 GUI 主环境安装 huggingface_hub。
+            # 若独立环境不存在/不完整，会给出明确提示。
+            os.makedirs(local_dir, exist_ok=True)
+            ok = self._download_via_runtime_venv(local_dir=local_dir, repo_id=repo_id, use_mirror=use_mirror)
+            if not ok:
                 return
 
-            os.makedirs(local_dir, exist_ok=True)
+            # 子进程下载完成后，继续进行本地验证与完成信号。
 
-            # 计算总大小
-            total_size = sum(REQUIRED_FILES.values()) + sum(f[2] for f in EXTERNAL_FILES)
-            downloaded_size = 0.0
-
-            self.progress_signal.emit(0.05, f"开始下载 {len(REQUIRED_FILES) + len(EXTERNAL_FILES)} 个文件...")
-
-            # 1. 下载主仓库文件
-            for filename, size_mb in REQUIRED_FILES.items():
-                if self._is_cancelled:
-                    self.error_signal.emit("下载已取消")
-                    return
-
-                local_path = os.path.join(local_dir, filename)
-
-                # 跳过已存在的文件
-                if os.path.exists(local_path):
-                    self.progress_signal.emit(
-                        0.05 + 0.9 * (downloaded_size + size_mb) / total_size,
-                        f"跳过已存在: {filename}"
-                    )
-                    downloaded_size += size_mb
-                    continue
-
-                self.progress_signal.emit(
-                    0.05 + 0.9 * downloaded_size / total_size,
-                    f"下载中: {filename} ({size_mb:.1f} MB)"
-                )
-
-                try:
-                    # 使用 hf_hub_download 下载单个文件
-                    hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=local_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    downloaded_size += size_mb
-                    self.file_downloaded_signal.emit(filename)
-
-                except Exception as e:
-                    self.error_signal.emit(f"下载 {filename} 失败: {e}")
-                    return
-
-            # 2. 下载外部依赖文件
-            for ext_repo_id, filename, size_mb, local_subpath in EXTERNAL_FILES:
-                if self._is_cancelled:
-                    self.error_signal.emit("下载已取消")
-                    return
-
-                # 构造本地完整路径
-                target_dir = os.path.join(local_dir, local_subpath)
-                local_path = os.path.join(target_dir, filename)
-
-                # 跳过已存在
-                if os.path.exists(local_path):
-                    self.progress_signal.emit(
-                        0.05 + 0.9 * (downloaded_size + size_mb) / total_size,
-                        f"跳过已存在: {filename}"
-                    )
-                    downloaded_size += size_mb
-                    continue
-
-                self.progress_signal.emit(
-                    0.05 + 0.9 * downloaded_size / total_size,
-                    f"下载中: {filename} ({size_mb:.1f} MB)"
-                )
-
-                try:
-                    hf_hub_download(
-                        repo_id=ext_repo_id,
-                        filename=filename,
-                        local_dir=target_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    downloaded_size += size_mb
-                    self.file_downloaded_signal.emit(filename)
-                except Exception as e:
-                    self.error_signal.emit(f"下载 {filename} 失败: {e}")
-                    return
+            # 这里不再在主环境中逐个下载文件（由独立 venv 子进程完成）。
 
             self.progress_signal.emit(0.95, "验证文件完整性...")
 

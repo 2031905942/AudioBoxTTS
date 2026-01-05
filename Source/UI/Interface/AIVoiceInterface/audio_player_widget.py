@@ -2,16 +2,87 @@ import os
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QSize, QPoint
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QAction
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QAction, QFont, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, 
-    QGraphicsDropShadowEffect, QFrame
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
+    QGraphicsDropShadowEffect, QFrame, QStackedLayout
 )
 from qfluentwidgets import (
     CardWidget, FluentIcon, TransparentToolButton, 
-    StrongBodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition
+    BodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition
 )
+
+
+class _UploadHintWidget(QFrame):
+    """空状态提示：横向图标 + 文案，点击触发上传。"""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._icon = QLabel(self)
+        pm = self._make_upload_tray_pixmap(20)
+        self._icon.setPixmap(pm)
+        self._icon.setFixedSize(24, 24)
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._icon, 0)
+
+        self._text = QLabel("将音频拖入任意位置  -或-  点击上传", self)
+        f = QFont()
+        f.setPointSize(12)
+        f.setBold(False)
+        self._text.setFont(f)
+        self._text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._text, 0)
+
+    def _make_upload_tray_pixmap(self, size: int) -> QPixmap:
+        """绘制托盘样式上传图标（上箭头 + U 型托盘），避免依赖特定 FluentIcon 枚举。"""
+        s = int(size)
+        pm = QPixmap(s, s)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        c = self.palette().color(self.foregroundRole())
+        pen = QPen(c, max(2, s // 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 箭头
+        cx = s * 0.5
+        top = s * 0.18
+        mid = s * 0.55
+        painter.drawLine(QPoint(int(cx), int(mid)), QPoint(int(cx), int(top)))
+        painter.drawLine(QPoint(int(cx), int(top)), QPoint(int(cx - s * 0.18), int(top + s * 0.18)))
+        painter.drawLine(QPoint(int(cx), int(top)), QPoint(int(cx + s * 0.18), int(top + s * 0.18)))
+
+        # 托盘（U 型）
+        left = s * 0.22
+        right = s * 0.78
+        tray_top = s * 0.62
+        tray_bottom = s * 0.82
+        painter.drawLine(QPoint(int(left), int(tray_top)), QPoint(int(left), int(tray_bottom)))
+        painter.drawLine(QPoint(int(right), int(tray_top)), QPoint(int(right), int(tray_bottom)))
+        painter.drawLine(QPoint(int(left), int(tray_bottom)), QPoint(int(right), int(tray_bottom)))
+
+        painter.end()
+        return pm
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 class WaveformWidget(QWidget):
     """音频波形可视化组件"""
@@ -122,53 +193,17 @@ class AudioPlayerWidget(CardWidget):
     # 信号
     play_requested = Signal()
     pause_requested = Signal()
-    audio_dropped = Signal(str)  # 拖拽文件信号
+    upload_requested = Signal()  # 空状态点击上传
     
     def __init__(self, title="Audio Player", parent=None, compact_mode=False):
         super().__init__(parent)
-        self.setAcceptDrops(True)  # 启用拖拽
         self._audio_path = ""
         self._duration = 0
         self._is_playing = False
-        self._is_dragging = False
         self._compact_mode = compact_mode
         
         self._init_ui(title)
         self._init_player()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls and urls[0].toLocalFile().lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                event.acceptProposedAction()
-                self._is_dragging = True
-                self.update()
-                return
-        event.ignore()
-        
-    def dragLeaveEvent(self, event):
-        self._is_dragging = False
-        self.update()
-        
-    def dropEvent(self, event):
-        self._is_dragging = False
-        self.update()
-        urls = event.mimeData().urls()
-        if urls:
-            file_path = urls[0].toLocalFile()
-            if file_path.lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                self.audio_dropped.emit(file_path)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._is_dragging:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pen = QPen(QColor("#ff6b00"), 2, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(QColor(255, 107, 0, 20))
-            rect = self.rect().adjusted(2, 2, -2, -2)
-            painter.drawRoundedRect(rect, 10, 10)
         
     def _init_ui(self, title_text):
         if self._compact_mode:
@@ -181,7 +216,7 @@ class AudioPlayerWidget(CardWidget):
             self.main_layout.setSpacing(12)
             
             # 1. 标题/文件名 (左侧)
-            self.title_label = StrongBodyLabel(title_text, self)
+            self.title_label = BodyLabel(title_text, self)
             self.main_layout.addWidget(self.title_label)
             
             # 工具栏区域 (紧跟标题之后，或者放在最右侧？放在标题后比较合理，方便操作)
@@ -189,10 +224,20 @@ class AudioPlayerWidget(CardWidget):
             self.tool_bar_layout.setSpacing(4)
             self.main_layout.addLayout(self.tool_bar_layout)
             
-            # 2. 波形显示 (中间，拉伸)
-            self.waveform = WaveformWidget(self)
+            # 2. 中间区域：空状态提示 / 波形显示（切换）
+            self._center_host = QWidget(self)
+            self._center_stack = QStackedLayout(self._center_host)
+            self._center_stack.setContentsMargins(0, 0, 0, 0)
+
+            self._empty_hint = _UploadHintWidget(self._center_host)
+            self._empty_hint.clicked.connect(self.upload_requested.emit)
+            self._center_stack.addWidget(self._empty_hint)
+
+            self.waveform = WaveformWidget(self._center_host)
             self.waveform.setFixedHeight(40)
-            self.main_layout.addWidget(self.waveform, 1)
+            self._center_stack.addWidget(self.waveform)
+
+            self.main_layout.addWidget(self._center_host, 1)
             
             # 3. 播放按钮 (右侧)
             self.play_btn = TransparentToolButton(FluentIcon.PLAY_SOLID, self)
@@ -221,6 +266,9 @@ class AudioPlayerWidget(CardWidget):
             self.current_time_label.hide()
             self.total_time_label = QLabel(self)
             self.total_time_label.hide()
+
+            # 初始为空状态：隐藏播放按钮 & 使用提示
+            self._set_empty_state(True)
             
         else:
             # 标准模式
@@ -238,7 +286,7 @@ class AudioPlayerWidget(CardWidget):
             # 图标 + 标题
             self.icon_label = TransparentToolButton(FluentIcon.MUSIC, self)
             self.icon_label.setEnabled(False) # 仅作为图标使用
-            self.title_label = StrongBodyLabel(title_text, self)
+            self.title_label = BodyLabel(title_text, self)
             
             header_layout.addWidget(self.icon_label)
             header_layout.addWidget(self.title_label)
@@ -297,6 +345,24 @@ class AudioPlayerWidget(CardWidget):
             
             self.main_layout.addLayout(controls_layout)
 
+    def _set_empty_state(self, empty: bool):
+        """切换空状态（仅 compact_mode 需要）。"""
+        if not getattr(self, "_compact_mode", False):
+            return
+        try:
+            if empty:
+                if hasattr(self, "_center_stack"):
+                    self._center_stack.setCurrentWidget(self._empty_hint)
+                if hasattr(self, "play_btn"):
+                    self.play_btn.hide()
+            else:
+                if hasattr(self, "_center_stack"):
+                    self._center_stack.setCurrentWidget(self.waveform)
+                if hasattr(self, "play_btn"):
+                    self.play_btn.show()
+        except Exception:
+            pass
+
     def _init_player(self):
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -309,20 +375,32 @@ class AudioPlayerWidget(CardWidget):
 
     def set_audio_path(self, path):
         """设置音频文件路径"""
-        self._audio_path = path
-        self.waveform.load_audio(path)
+        self._audio_path = path or ""
+
+        # 空状态：未选择/文件不存在
+        if not path or not os.path.exists(path):
+            if getattr(self, "_compact_mode", False):
+                self._set_empty_state(True)
+            # 不要 disable 整个组件，否则无法点击上传
+            try:
+                self.title_label.setText("音色参考音频")
+            except Exception:
+                pass
+            return
+
+        # 已选择：加载波形并切回播放视图
+        try:
+            self.waveform.load_audio(path)
+        except Exception:
+            pass
+        if getattr(self, "_compact_mode", False):
+            self._set_empty_state(False)
         
         # 更新标题为文件名
-        if path and os.path.exists(path):
-            self.title_label.setText(os.path.basename(path))
-        
-        if os.path.exists(path):
-            self.player.setSource(QUrl.fromLocalFile(path))
-            self.title_label.setText(os.path.basename(path))
-            self.setEnabled(True)
-        else:
-            self.title_label.setText("未选择文件")
-            self.setEnabled(False)
+        self.title_label.setText(os.path.basename(path))
+
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.setEnabled(True)
 
     def add_tool_button(self, icon, tooltip, callback):
         """在右上角添加工具按钮"""

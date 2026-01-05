@@ -29,6 +29,7 @@ class IndexTTSEnvJob(BaseJob):
         self._current_operation = "install"  # install or uninstall
         self._log_file_path: str | None = None
         self._had_error: bool = False
+        self._ui_log_throttle_ts: float = 0.0
 
     @property
     def install_log(self) -> str:
@@ -115,13 +116,16 @@ class IndexTTSEnvJob(BaseJob):
         self._progress_bar_window.set_enable_cancel(True)
         self._progress_bar_window.cancel_signal.connect(self.cancel_install)
         self._progress_bar_window.set_text(title)
-        self._progress_bar_window.set_total_count(100)
+        # 用更细的刻度让进度条“平滑滑动”
+        self._progress_bar_window.set_total_count(1000)
         self._progress_bar_window.set_current_count(0)
+        # 依赖安装阶段不再展示 8/100 这类“文件数计数”，改为文本显示总体百分比/GB
+        self._progress_bar_window.set_show_counter(False)
 
     def _on_progress(self, progress: float, text: str):
         """进度更新"""
         if self._progress_bar_window:
-            self._progress_bar_window.set_current_count(int(progress * 100))
+            self._progress_bar_window.set_current_count(int(progress * 1000))
             self._progress_bar_window.set_text(text)
 
     def _on_error(self, message: str):
@@ -164,11 +168,8 @@ class IndexTTSEnvJob(BaseJob):
     def _on_log(self, line: str):
         """日志输出"""
         self._log_lines.append(line)
-        if self._progress_bar_window:
-            try:
-                self._progress_bar_window.set_text(line)
-            except Exception:
-                pass
+        # 不再用每行日志覆盖进度弹窗文本（会导致卡顿/闪烁/窗口被长文本撑宽）。
+        # 弹窗文本由 progress_signal 控制；日志仍输出到终端+落盘。
         try:
             print(f"[IndexTTSEnvJob] {line}", flush=True)
         except Exception:
@@ -188,6 +189,8 @@ class IndexTTSEnvJob(BaseJob):
         Returns:
             (是否就绪, 描述)
         """
-        # 使用新的子进程安全检测方法
-        is_ready, msg, _ = IndexTTSEnvUtility.check_full_env_status()
+        # UI 线程通常会调用该方法（例如点击“加载模型/生成音频”前）。
+        # Windows 上 import torch 可能导致明显卡顿，因此默认用 fast 检测：
+        # 只检查 venv + 依赖可导入，不探测 CUDA。
+        is_ready, msg, _ = IndexTTSEnvUtility.check_full_env_status_fast()
         return is_ready, msg

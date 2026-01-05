@@ -101,7 +101,15 @@ class IndexTTSUtility(QObject):
         """
         missing = []
         for f in IndexTTSUtility.get_required_files():
-            if not os.path.exists(os.path.join(model_dir, f)):
+            fp = os.path.join(model_dir, f)
+            if not os.path.exists(fp):
+                missing.append(f)
+                continue
+            # 轻量完整性：避免空文件/截断文件被当作“存在即可”。
+            try:
+                if os.path.getsize(fp) <= 0:
+                    missing.append(f)
+            except Exception:
                 missing.append(f)
         return len(missing) == 0, missing
 

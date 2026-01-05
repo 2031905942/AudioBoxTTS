@@ -9,14 +9,13 @@
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, 
-    QFrame, QGridLayout, QGraphicsDropShadowEffect
+    QWidget, QVBoxLayout, QHBoxLayout,
+    QFrame, QGridLayout
 )
 from qfluentwidgets import (
     CardWidget,
-    StrongBodyLabel, CaptionLabel
+    BodyLabel, CaptionLabel, ScrollArea
 )
 
 from Source.UI.Interface.AIVoiceInterface.character_button import CharacterButton, AddCharacterButton
@@ -33,7 +32,7 @@ class CharacterListWidget(CardWidget):
     add_character_requested = Signal()
     
     # 布局常量
-    COLUMNS = 5
+    COLUMNS = 6
     ITEM_WIDTH = 78
     ITEM_HEIGHT = 88
     GRID_SPACING = 6
@@ -52,21 +51,13 @@ class CharacterListWidget(CardWidget):
         self._refresh_list()
     
     def _apply_style(self):
-        """应用现代化样式"""
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 30))
-        self.setGraphicsEffect(shadow)
-        
-        self.setStyleSheet("""
-            CharacterListWidget {
-                background-color: #ffffff;
-                border-radius: 12px;
-                border: 1px solid #e8e8e8;
-            }
-        """)
+        """使用 qfluentwidgets 的默认 CardWidget 风格。"""
+        # 避免硬编码颜色/阴影，交给 Fluent 主题控制。
+        try:
+            self.setGraphicsEffect(None)
+        except Exception:
+            pass
+        self.setStyleSheet("")
     
     def _init_ui(self):
         """初始化 UI"""
@@ -83,11 +74,10 @@ class CharacterListWidget(CardWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
         
-        title_label = StrongBodyLabel("角色列表", header)
+        title_label = BodyLabel("角色列表", header)
         header_layout.addWidget(title_label)
         
         self._count_label = CaptionLabel("", header)
-        self._count_label.setStyleSheet("color: #888;")
         header_layout.addWidget(self._count_label)
         
         header_layout.addStretch()
@@ -95,41 +85,30 @@ class CharacterListWidget(CardWidget):
         main_layout.addWidget(header)
         
         # === 滚动区域 ===
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # 固定一行高度下，通过滚动条浏览全部
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll_area.setStyleSheet("""
-            QScrollArea {
-                background: transparent;
-                border: none;
-            }
-            QScrollBar:vertical {
-                background: #f5f5f5;
-                width: 8px;
-                margin: 0;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #c0c0c0;
-                border-radius: 4px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #a0a0a0;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-        """)
+        # 避免滚动区域自身绘制出“长方形底色/阴影感”，让 CardWidget 的底色保持一致
+        try:
+            self._scroll_area.setStyleSheet("background: transparent; border: none;")
+        except Exception:
+            pass
+        try:
+            self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        except Exception:
+            pass
         
         # 内容容器
         self._content_widget = QWidget()
-        self._content_widget.setStyleSheet("background: transparent;")
+        try:
+            self._content_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        except Exception:
+            pass
         self._grid_layout = QGridLayout(self._content_widget)
-        self._grid_layout.setContentsMargins(0, 0, 0, 0)
+        # 给头像上方留出间隙，避免贴着上边缘显得拥挤
+        self._grid_layout.setContentsMargins(2, 6, 2, 2)
         self._grid_layout.setSpacing(self.GRID_SPACING)
         self._grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         

@@ -11,9 +11,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QPainter, QPainterPath
 from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QFileDialog
 from qfluentwidgets import (
-    MessageBoxBase, SubtitleLabel, BodyLabel, LineEdit,
-    PushButton, FluentIcon, InfoBar, InfoBarPosition,
-    ImageLabel
+    MessageBoxBase, SubtitleLabel, BodyLabel, CaptionLabel, LineEdit,
+    InfoBar, InfoBarPosition
 )
 
 
@@ -36,10 +35,45 @@ class CharacterDialog(MessageBoxBase):
         """
         super().__init__(parent)
         
-        self._avatar_path = avatar_path
+        self._avatar_path = self._to_relative_path(avatar_path)
         self._is_edit_mode = bool(character_name)
         
         self._init_ui(character_name, avatar_path)
+
+    @staticmethod
+    def _get_project_root() -> str:
+        here = os.path.abspath(__file__)
+        # .../Source/UI/Interface/AIVoiceInterface/character_dialog.py -> repo root
+        return os.path.abspath(os.path.join(os.path.dirname(here), "..", "..", "..", "..", ".."))
+
+    @classmethod
+    def _get_default_avatar_dir(cls) -> str:
+        root = cls._get_project_root()
+        icon_dir = os.path.join(root, "Resource", "CharacterIcon")
+        return icon_dir if os.path.isdir(icon_dir) else root
+
+    @classmethod
+    def _resolve_path(cls, path: str) -> str:
+        if not path:
+            return ""
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(os.path.join(cls._get_project_root(), path))
+
+    @classmethod
+    def _to_relative_path(cls, path: str) -> str:
+        """将项目内路径尽量存为相对路径，便于迁移。"""
+        if not path:
+            return ""
+        try:
+            abs_path = path if os.path.isabs(path) else os.path.abspath(os.path.join(cls._get_project_root(), path))
+            rel = os.path.relpath(abs_path, cls._get_project_root())
+            # 若跨盘符或无法 relpath，会返回带盘符/.. 的结果，这里仅保留项目内相对路径
+            if rel.startswith("..") or os.path.isabs(rel):
+                return path
+            return rel.replace("\\", "/")
+        except Exception:
+            return path
     
     def _init_ui(self, character_name: str, avatar_path: str):
         """初始化 UI"""
@@ -65,8 +99,9 @@ class CharacterDialog(MessageBoxBase):
         """)
         self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        if avatar_path and os.path.exists(avatar_path):
-            self._set_avatar(avatar_path)
+        resolved_avatar = self._resolve_path(avatar_path)
+        if resolved_avatar and os.path.exists(resolved_avatar):
+            self._set_avatar(resolved_avatar)
         else:
             self.avatar_label.setText("点击\n选择头像")
         
@@ -75,11 +110,14 @@ class CharacterDialog(MessageBoxBase):
         
         avatar_layout.addWidget(self.avatar_label)
         self.viewLayout.addLayout(avatar_layout)
-        
-        # 选择头像按钮（使用 qfluentwidgets PushButton）
-        self.select_avatar_btn = PushButton(FluentIcon.PHOTO, "选择头像", self)
-        self.select_avatar_btn.clicked.connect(self._on_avatar_clicked)
-        self.viewLayout.addWidget(self.select_avatar_btn)
+
+        # 提示：头像可不选择（使用 CaptionLabel 走主题的浅灰文本）
+        avatar_hint = CaptionLabel("可以不选择头像哦", self)
+        try:
+            avatar_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        except Exception:
+            pass
+        self.viewLayout.addWidget(avatar_hint)
         
         # 昵称输入
         name_layout = QHBoxLayout()
@@ -103,16 +141,16 @@ class CharacterDialog(MessageBoxBase):
     def _on_avatar_clicked(self):
         """点击选择头像"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择头像图片", "",
+            self, "选择头像图片", self._get_default_avatar_dir(),
             "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif);;所有文件 (*.*)"
         )
         if file_path:
-            self._avatar_path = file_path
-            self._set_avatar(file_path)
+            self._avatar_path = self._to_relative_path(file_path)
+            self._set_avatar(self._resolve_path(self._avatar_path))
     
     def _set_avatar(self, image_path: str):
         """设置头像"""
-        pixmap = QPixmap(image_path)
+        pixmap = QPixmap(self._resolve_path(image_path))
         if pixmap.isNull():
             return
         

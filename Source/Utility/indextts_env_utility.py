@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from typing import Optional, List, Tuple
+import re
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -154,6 +155,64 @@ print(json.dumps(result, ensure_ascii=False))
             return False, f"独立环境检测异常: {str(e)}", []
 
     @staticmethod
+    def check_full_env_status_fast() -> Tuple[bool, str, List[str]]:
+        """快速检查 IndexTTS2 独立 venv 是否就绪（子进程）。
+
+        与 `check_full_env_status()` 的区别：
+        - 不 import torch / 不探测 CUDA
+        - 只检查 venv 是否存在、依赖模块是否可 find_spec
+
+        该方法适合在 UI 线程调用，用来避免 Windows 上 import torch 带来的 1-2s 卡顿。
+        """
+        import json
+
+        paths = get_runtime_paths()
+        if not os.path.exists(paths.venv_python):
+            missing = [pkg_name for _, pkg_name in _CHECK_IMPORTS]
+            return False, "未安装 IndexTTS2 独立环境", missing
+
+        check_script = """
+import importlib.util
+import json
+
+deps = %s
+missing = []
+
+for import_name, pkg_name in deps:
+    try:
+        if importlib.util.find_spec(import_name) is None:
+            missing.append(pkg_name)
+    except Exception:
+        missing.append(pkg_name)
+
+print(json.dumps({"missing": missing}, ensure_ascii=False))
+""" % (repr(_CHECK_IMPORTS))
+
+        try:
+            creation_flags = 0x08000000 if sys.platform == "win32" else 0
+            proc = subprocess.run(
+                [paths.venv_python, "-c", check_script],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                creationflags=creation_flags,
+            )
+
+            if proc.returncode != 0:
+                return False, "独立环境检测失败（Python/依赖异常）", []
+
+            data = json.loads((proc.stdout or "").strip() or "{}")
+            missing = data.get("missing", [])
+            if missing:
+                return False, f"缺少依赖: {', '.join(missing[:3])}{'...' if len(missing) > 3 else ''}", missing
+            return True, "环境就绪（独立 venv）", []
+
+        except subprocess.TimeoutExpired:
+            return False, "独立环境检测超时", []
+        except Exception as e:
+            return False, f"独立环境检测异常: {str(e)}", []
+
+    @staticmethod
     def check_cuda_available() -> Tuple[bool, str]:
         """检查独立 venv 中 CUDA 是否可用（子进程）。"""
         import re
@@ -219,45 +278,42 @@ print(json.dumps(result, ensure_ascii=False))
             self.log_signal.emit(f"PyPI 源: {pypi_index}")
             self.log_signal.emit(f"PyTorch 后端: {torch_backend}")
 
-            if not os.path.exists(paths.venv_python):
-                self.progress_signal.emit(0.08, "创建独立 venv...")
-                os.makedirs(paths.runtime_root, exist_ok=True)
-                # NOTE: The embedded Python shipped with this app may not include stdlib `venv`.
-                # Use `uv venv` which does not rely on `python -m venv`.
-                self._run_cmd_stream(
-                    [
-                        self._python_path,
-                        "-m",
-                        "uv",
-                        "venv",
-                        paths.venv_dir,
-                        "--python",
-                        self._python_path,
-                        "--no-python-downloads",
-                        "--seed",
-                        "--clear",
-                    ]
-                )
-
-            self.progress_signal.emit(0.15, "使用 uv 安装/同步依赖（可能需要较长时间）...")
+            # IMPORTANT:
+            # - `uv pip sync` is designed for `requirements.txt`/`uv.lock` workflows and will
+            #   typically install packages without resolving transitive dependencies when fed
+            #   only a `pyproject.toml`.
+            # - The upstream IndexTTS2 README uses `uv sync`; we follow that so dependencies
+            #   like `huggingface_hub` (required by transformers) are installed correctly.
+            # - Our Runtime folder is not a full, buildable project; use `--no-install-project`.
+            self.progress_signal.emit(0.08, "使用 uv 同步依赖（生成 lockfile；可能需要较长时间）...")
 
             cmd = [
                 self._python_path,
                 "-m",
                 "uv",
-                "pip",
                 "sync",
-                "-vv",
-                paths.pyproject_path,
+                "--project",
+                paths.runtime_root,
+                "--no-install-project",
+                "--no-dev",
                 "--python",
-                paths.venv_python,
-                "--torch-backend",
-                torch_backend,
+                self._python_path,
                 "--no-python-downloads",
                 "--default-index",
                 pypi_index,
+                "--color",
+                "never",
             ]
-            self._run_cmd_stream(cmd)
+            # CPU 模式：忽略 `tool.uv.sources`（即忽略 PyTorch CUDA 专用 index），让 torch 从默认源安装。
+            if not use_cuda:
+                cmd.append("--no-sources")
+
+            self._run_uv_sync_with_smooth_progress(
+                cmd,
+                base_progress=0.08,
+                end_progress=0.90,
+                title="同步依赖",
+            )
 
             self.progress_signal.emit(0.95, "验证独立环境...")
             is_ok, missing = self.check_dependencies_installed()
@@ -330,6 +386,189 @@ print(json.dumps(result, ensure_ascii=False))
                     last_lines.pop(0)
 
         rc = process.wait()
+        if rc != 0:
+            tail = "\n".join(last_lines[-30:])
+            if tail.strip():
+                raise RuntimeError(f"命令执行失败 (exit={rc})\n\n--- last output ---\n{tail}")
+            raise RuntimeError(f"命令执行失败 (exit={rc})")
+
+    @staticmethod
+    def _bytes_to_gb(num_bytes: int) -> float:
+        return max(0.0, float(num_bytes) / (1024.0 ** 3))
+
+    @staticmethod
+    def _parse_size_to_bytes(size_text: str) -> int:
+        """解析 uv 输出里的大小文本，如 4.5MiB / 3.2GiB。"""
+        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG]iB)\s*$", size_text)
+        if not m:
+            return 0
+        num = float(m.group(1))
+        unit = m.group(2)
+        factor = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}.get(unit, 0)
+        return int(num * factor)
+
+    def _run_uv_sync_with_smooth_progress(
+        self,
+        cmd: List[str],
+        *,
+        base_progress: float,
+        end_progress: float,
+        title: str,
+    ) -> None:
+        """运行 uv sync，并基于 stdout 文本输出估算“总体百分比/已下载 GB”。
+
+        说明：uv 在非 TTY 下不会提供逐字节进度。之前通过遍历 cache 目录体积来估算，
+        在 Windows 上可能导致 uv 临时文件重命名时出现“拒绝访问 (os error 5)”。
+        这里改成只解析 `Downloading xxx (10.0MiB)` / `Downloaded xxx` 行，
+        并用“历史平均下载速率 + 时间插值”让单个依赖下载期间进度条持续滑动。
+        """
+        import queue
+        import threading
+
+        self.log_signal.emit(f"执行: {' '.join(cmd)}")
+
+        creation_flags = 0x08000000 if sys.platform == "win32" else 0
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
+
+        assert process.stdout is not None
+        q: "queue.Queue[str]" = queue.Queue()
+        last_lines: List[str] = []
+        last_activity_text = ""
+
+        def _reader():
+            try:
+                for raw in process.stdout:
+                    q.put(raw)
+            finally:
+                try:
+                    process.stdout.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+
+        # download accounting
+        total_known_bytes = 0
+        downloaded_done_bytes = 0
+        current_pkg = ""
+        current_pkg_size = 0
+        current_pkg_start_ts: float | None = None
+        avg_rate_bps = 0.0  # moving average bytes/sec
+
+        last_tick = 0.0
+        last_emit = 0.0
+
+        downloading_re = re.compile(r"^Downloading\s+(.+?)\s+\(([^)]+)\)\s*$")
+        downloaded_re = re.compile(r"^Downloaded\s+(.+?)\s*$")
+
+        def _estimate_current_bytes(now: float) -> int:
+            if not current_pkg or current_pkg_size <= 0 or current_pkg_start_ts is None:
+                return 0
+            # 如果没有历史速率，给一个保守默认值（不会太快也不会卡住）
+            rate = avg_rate_bps if avg_rate_bps > 0 else 12 * 1024 * 1024
+            est = int((now - current_pkg_start_ts) * rate)
+            # 不要超过 95%，等待真正的 Downloaded 行来“结算”
+            return min(int(current_pkg_size * 0.95), max(0, est))
+
+        def _emit_progress(force: bool = False):
+            nonlocal last_emit
+            now = time.time()
+            if not force and (now - last_emit) < 0.25:
+                return
+            last_emit = now
+
+            est_current = _estimate_current_bytes(now)
+            denom = max(1, total_known_bytes if total_known_bytes > 0 else (downloaded_done_bytes + max(1, current_pkg_size)))
+            ratio = min(1.0, float(downloaded_done_bytes + est_current) / float(denom))
+            progress = base_progress + (end_progress - base_progress) * ratio
+
+            downloaded_gb = self._bytes_to_gb(downloaded_done_bytes + est_current)
+            total_gb = self._bytes_to_gb(denom)
+            pct = min(99.9, max(0.0, ratio * 100.0))
+
+            line1 = title
+            if last_activity_text:
+                line1 = f"{title}: {last_activity_text}"
+            line2 = f"{pct:.1f}% | 已下载 {downloaded_gb:.2f} / ~{total_gb:.2f} GB"
+            self.progress_signal.emit(progress, f"{line1}\n{line2}")
+
+        _emit_progress(force=True)
+
+        while True:
+            if self._is_cancelled:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                raise RuntimeError("操作已取消")
+
+            try:
+                raw = q.get(timeout=0.15)
+            except queue.Empty:
+                raw = None
+
+            if raw is not None:
+                line = raw.rstrip("\n")
+                if line.strip():
+                    self.log_signal.emit(line)
+                    last_lines.append(line)
+                    if len(last_lines) > 120:
+                        last_lines.pop(0)
+
+                    # 试图从输出中提取“当前包/动作”，用于第一行展示
+                    s = line.strip()
+                    # 常见模式："Downloaded numpy" / "Downloading numpy" / "Installing ..."
+                    for prefix in ("Downloading ", "Downloaded ", "Installing ", "Installed "):
+                        if s.startswith(prefix):
+                            last_activity_text = s[len(prefix):].strip()
+                            break
+
+                    m1 = downloading_re.match(s)
+                    if m1:
+                        current_pkg = m1.group(1).strip()
+                        size_bytes = self._parse_size_to_bytes(m1.group(2).strip())
+                        current_pkg_size = size_bytes
+                        current_pkg_start_ts = time.time()
+                        if size_bytes > 0:
+                            total_known_bytes += size_bytes
+
+                    m2 = downloaded_re.match(s)
+                    if m2 and current_pkg:
+                        # 结算当前包
+                        now2 = time.time()
+                        if current_pkg_start_ts is not None and current_pkg_size > 0:
+                            dt = max(0.05, now2 - current_pkg_start_ts)
+                            inst_rate = float(current_pkg_size) / dt
+                            # 指数滑动平均，避免抖动
+                            avg_rate_bps = inst_rate if avg_rate_bps <= 0 else (avg_rate_bps * 0.7 + inst_rate * 0.3)
+                            downloaded_done_bytes += current_pkg_size
+
+                        current_pkg = ""
+                        current_pkg_size = 0
+                        current_pkg_start_ts = None
+
+                _emit_progress(force=True)
+
+            rc = process.poll()
+            now = time.time()
+            if (now - last_tick) >= 0.5:
+                last_tick = now
+                _emit_progress(force=False)
+
+            if rc is not None and q.empty():
+                break
+
+        rc = process.wait()
+        _emit_progress(force=True)
         if rc != 0:
             tail = "\n".join(last_lines[-30:])
             if tail.strip():

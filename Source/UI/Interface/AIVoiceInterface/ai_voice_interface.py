@@ -7,14 +7,15 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import QStandardPaths, QUrl, QRunnable, QThreadPool, QObject, Signal, Slot, Qt, QTimer
+from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QVBoxLayout, QWidget, QSizePolicy
+    QVBoxLayout, QWidget, QSizePolicy, QStackedLayout, QLabel
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, InfoBar, InfoBarPosition,
-    MessageBox, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, RadioButton,
+    MessageBox, MessageBoxBase, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, RadioButton,
     Slider, StrongBodyLabel, TitleLabel,
     ToolTipFilter, ToolTipPosition, TransparentToolButton
 )
@@ -25,54 +26,6 @@ from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialo
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import AudioPlayerWidget
 from Source.UI.Basic.progress_bar_window import ProgressBarWindow
-
-
-class ReferenceAudioCard(CardWidget):
-    """支持拖拽的参考音频卡片"""
-    
-    audio_dropped = Signal(str)
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self._is_dragging = False
-        
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls and urls[0].toLocalFile().lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                event.acceptProposedAction()
-                self._is_dragging = True
-                self.update()
-                return
-        event.ignore()
-        
-    def dragLeaveEvent(self, event):
-        self._is_dragging = False
-        self.update()
-        
-    def dropEvent(self, event):
-        self._is_dragging = False
-        self.update()
-        urls = event.mimeData().urls()
-        if urls:
-            file_path = urls[0].toLocalFile()
-            if file_path.lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                self.audio_dropped.emit(file_path)
-                
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._is_dragging:
-            from PySide6.QtGui import QPainter, QPen, QColor
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # 绘制虚线边框
-            pen = QPen(QColor("#009faa"), 2, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(QColor(0, 159, 170, 20))
-            rect = self.rect().adjusted(2, 2, -2, -2)
-            painter.drawRoundedRect(rect, 10, 10)
 
 
 class EnvCheckSignals(QObject):
@@ -95,6 +48,284 @@ class EnvCheckWorker(QRunnable):
             self.signals.finished.emit(is_ready, msg)
         except Exception as e:
             self.signals.finished.emit(False, f"检测失败: {str(e)}")
+
+
+class DragDropOverlay(QWidget):
+    """全界面拖拽遮罩层。
+
+    目的：
+    - 拦截拖拽事件，避免输入框等子控件抢占 drop（把路径写进文本框）。
+    - 在遮罩层上绘制橙色虚线框 + 图标 + 提示文本。
+    """
+
+    audio_dropped = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setVisible(False)
+        # 透明背景，但仍然接收 drag/drop 事件
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+    @staticmethod
+    def _is_audio_url(event) -> Optional[str]:
+        if not event.mimeData().hasUrls():
+            return None
+        urls = event.mimeData().urls()
+        if not urls:
+            return None
+        file_path = urls[0].toLocalFile()
+        if not file_path:
+            return None
+        if file_path.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
+            return file_path
+        return None
+
+    def dragEnterEvent(self, event):
+        file_path = self._is_audio_url(event)
+        if file_path:
+            event.acceptProposedAction()
+            self.show()
+            self.raise_()
+            self.update()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        file_path = self._is_audio_url(event)
+        if file_path:
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.hide()
+        self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        file_path = self._is_audio_url(event)
+        self.hide()
+        self.update()
+        if file_path:
+            event.acceptProposedAction()
+            self.audio_dropped.emit(file_path)
+            return
+        event.ignore()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isVisible():
+            return
+
+        from PySide6.QtGui import QPainter, QPen, QColor, QFont
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 橙色虚线框
+        pen = QPen(QColor("#ff6b00"), 3, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QColor(255, 107, 0, 20))
+        rect = self.rect().adjusted(8, 8, -8, -8)
+        painter.drawRoundedRect(rect, 12, 12)
+
+        # 中心图标 + 文本
+        icon_size = 44
+        icon = None
+        try:
+            icon = FluentIcon.MUSIC.icon()
+        except Exception:
+            icon = None
+
+        cx = self.rect().center().x()
+        cy = self.rect().center().y()
+
+        if icon is not None:
+            pm = icon.pixmap(icon_size, icon_size)
+            painter.drawPixmap(cx - icon_size // 2, cy - icon_size // 2 - 28, pm)
+
+        painter.setPen(QColor("#ff6b00"))
+        font = QFont()
+        font.setPointSize(11)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.drawText(self.rect().adjusted(16, 0, -16, 0), Qt.AlignmentFlag.AlignCenter,
+                         "拖拽音频文件到此处导入参考音频")
+
+        painter.setPen(QColor(120, 120, 120))
+        font2 = QFont()
+        font2.setPointSize(9)
+        font2.setBold(False)
+        painter.setFont(font2)
+        sub_rect = self.rect().adjusted(16, 28, -16, 0)
+        painter.drawText(sub_rect, Qt.AlignmentFlag.AlignCenter, "支持 wav / mp3 / flac / ogg")
+
+
+class DownloadModelChoiceDialog(MessageBoxBase):
+    """下载模型方式选择弹窗（四个按钮，两行布局避免重叠）。"""
+
+    def __init__(self, parent, save_dir: str):
+        super().__init__(parent)
+        self.choice: str | None = None  # mirror/direct/delete_env/cancel
+
+        title = BodyLabel("准备下载模型", self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(
+            "环境依赖检测通过。\n\n"
+            f"即将下载模型文件到:\n{AIVoiceInterface._wrap_path_for_label(save_dir)}\n\n"
+            "文件大小约 5GB，请选择下载方式：",
+            self,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 清空默认按钮布局里的两个按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        # 自定义按钮（两行 2x2）
+        btn_grid_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        mirror_btn = PrimaryPushButton(FluentIcon.DOWNLOAD, "镜像下载 (推荐)", btn_grid_host)
+        direct_btn = PushButton(FluentIcon.DOWNLOAD, "直连下载", btn_grid_host)
+        delete_env_btn = PushButton(FluentIcon.DELETE, "删除环境依赖", btn_grid_host)
+        cancel_btn = PushButton("取消", btn_grid_host)
+
+        for b in (mirror_btn, direct_btn, delete_env_btn, cancel_btn):
+            b.setMinimumWidth(170)
+            b.setMinimumHeight(34)
+
+        grid.addWidget(mirror_btn, 0, 0)
+        grid.addWidget(direct_btn, 0, 1)
+        grid.addWidget(delete_env_btn, 1, 0)
+        grid.addWidget(cancel_btn, 1, 1)
+
+        # 让 buttonGroup 有足够高度容纳两行按钮
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 12 + 34 + 24)
+        except Exception:
+            pass
+
+        self.buttonLayout.addWidget(btn_grid_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        def _pick(v: str, accept: bool):
+            self.choice = v
+            if accept:
+                self.accept()
+            else:
+                self.reject()
+
+        mirror_btn.clicked.connect(lambda: _pick("mirror", True))
+        direct_btn.clicked.connect(lambda: _pick("direct", True))
+        delete_env_btn.clicked.connect(lambda: _pick("delete_env", False))
+        cancel_btn.clicked.connect(lambda: _pick("cancel", False))
+
+        # 控制弹窗宽度，避免路径/文本挤压按钮
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = min(820, int(avail.width() * 0.82))
+            else:
+                w = 780
+            self.widget.setMinimumWidth(max(620, w))
+        except Exception:
+            self.widget.setMinimumWidth(720)
+
+
+class DeleteAssetsChoiceDialog(MessageBoxBase):
+    """删除资源选择弹窗（避免 MessageBox 插入按钮导致重叠）。
+
+    choice:
+        - delete_model: 删除模型文件
+        - delete_env: 删除环境依赖
+        - cancel: 取消
+    """
+
+    def __init__(self, parent, save_dir: str):
+        super().__init__(parent)
+        self.choice: str | None = None
+
+        title = BodyLabel("删除依赖和/或模型", self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(
+            "请选择要删除的内容：\n\n"
+            f"模型目录: {AIVoiceInterface._wrap_path_for_label(save_dir)}\n"
+            "独立环境: Runtime/IndexTTS2/.venv\n\n"
+            "删除模型文件后，需重新下载才能使用语音合成功能；\n",
+            self,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 移除默认 yes/cancel，使用自定义布局
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_grid_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        delete_model_btn = PrimaryPushButton(FluentIcon.DELETE, "删除模型文件", btn_grid_host)
+        delete_env_btn = PushButton(FluentIcon.DELETE, "删除环境依赖", btn_grid_host)
+        cancel_btn = PushButton("取消", btn_grid_host)
+
+        for b in (delete_model_btn, delete_env_btn, cancel_btn):
+            b.setMinimumWidth(180)
+            b.setMinimumHeight(34)
+
+        grid.addWidget(delete_model_btn, 0, 0)
+        grid.addWidget(delete_env_btn, 0, 1)
+        # 取消按钮单独一行，跨两列，避免窄屏挤压
+        grid.addWidget(cancel_btn, 1, 0, 1, 2)
+
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 12 + 34 + 24)
+        except Exception:
+            pass
+
+        self.buttonLayout.addWidget(btn_grid_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        def _pick(v: str, accept: bool):
+            self.choice = v
+            if accept:
+                self.accept()
+            else:
+                self.reject()
+
+        delete_model_btn.clicked.connect(lambda: _pick("delete_model", True))
+        delete_env_btn.clicked.connect(lambda: _pick("delete_env", False))
+        cancel_btn.clicked.connect(lambda: _pick("cancel", False))
+
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = min(820, int(avail.width() * 0.82))
+            else:
+                w = 780
+            self.widget.setMinimumWidth(max(620, w))
+        except Exception:
+            self.widget.setMinimumWidth(720)
 
 
 class AIVoiceInterface(QFrame):
@@ -135,11 +366,69 @@ class AIVoiceInterface(QFrame):
         self._env_ready = False
         self._model_ready = False
 
+        # 生成状态：用于区分“模型加载完成”和“语音合成完成”都走 job_completed(True)
+        self._synthesis_in_progress = False
+
         # 启用拖拽支持
         self.setAcceptDrops(True)
+        self._drag_overlay = DragDropOverlay(self)
+        self._drag_overlay.audio_dropped.connect(self._on_audio_dropped)
+        self._drag_overlay.hide()
 
         self._init_ui()
         self._connect_signals()
+
+    @staticmethod
+    def _wrap_path_for_label(path: str) -> str:
+        """给路径插入零宽断点，避免对话框因长路径被撑宽。"""
+        if not path:
+            return ""
+        # Allow line breaks after separators without changing what user sees.
+        return path.replace("\\", "\\\u200b").replace("/", "/\u200b")
+
+    @staticmethod
+    def _tune_message_box(msg: MessageBox) -> None:
+        """统一 MessageBox 宽度与按钮尺寸，避免按钮文字显示不全。"""
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                min_w = min(760, int(avail.width() * 0.78))
+                max_w = int(avail.width() * 0.90)
+            else:
+                min_w, max_w = 720, 980
+
+            msg.setMinimumWidth(max(560, min_w))
+            msg.setMaximumWidth(max_w)
+        except Exception:
+            pass
+
+        # 统一按钮尺寸
+        for btn in (getattr(msg, "yesButton", None), getattr(msg, "cancelButton", None)):
+            if btn is None:
+                continue
+            try:
+                btn.setMinimumWidth(150)
+                btn.setMinimumHeight(34)
+            except Exception:
+                pass
+
+        # 处理插入到 buttonLayout 的额外按钮
+        try:
+            layout = getattr(msg, "buttonLayout", None)
+            if layout is not None:
+                for i in range(layout.count()):
+                    item = layout.itemAt(i)
+                    w = item.widget() if item is not None else None
+                    if w is None:
+                        continue
+                    try:
+                        w.setMinimumWidth(150)
+                        w.setMinimumHeight(34)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def dragEnterEvent(self, event):
         """处理拖拽进入事件"""
@@ -147,16 +436,44 @@ class AIVoiceInterface(QFrame):
             urls = event.mimeData().urls()
             if urls and urls[0].toLocalFile().lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
                 event.acceptProposedAction()
+                # 显示全界面遮罩层（拦截 drop，避免文本框等抢占）
+                try:
+                    self._drag_overlay.setGeometry(self.rect())
+                    self._drag_overlay.show()
+                    self._drag_overlay.raise_()
+                except Exception:
+                    pass
                 return
         event.ignore()
 
+    def dragLeaveEvent(self, event):
+        """处理拖拽离开事件"""
+        try:
+            self._drag_overlay.hide()
+        except Exception:
+            pass
+        self.update()
+
     def dropEvent(self, event):
         """处理拖拽放下事件"""
+        # 理论上 drop 会被 overlay 接走；这里兜底处理
+        try:
+            self._drag_overlay.hide()
+        except Exception:
+            pass
+        self.update()
         urls = event.mimeData().urls()
         if urls:
             file_path = urls[0].toLocalFile()
             if file_path.lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
                 self._on_audio_dropped(file_path)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self._drag_overlay.setGeometry(self.rect())
+        except Exception:
+            pass
 
     def _init_ui(self):
         """初始化 UI"""
@@ -207,28 +524,15 @@ class AIVoiceInterface(QFrame):
         # 使用 CardWidget 包装
         panel = CardWidget(self)
         
-        # 添加阴影效果
-        shadow = QGraphicsDropShadowEffect(panel)
-        shadow.setBlurRadius(20)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 30))
-        panel.setGraphicsEffect(shadow)
-        
-        panel.setStyleSheet("""
-            CardWidget {
-                background-color: #ffffff;
-                border-radius: 12px;
-                border: 1px solid #e8e8e8;
-            }
-        """)
+        # 移除手动设置的阴影和背景色，使用 CardWidget 的默认主题样式
+        # 这样可以保证在不同主题（亮/暗）下显示一致，且不会过亮
         
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(16, 14, 16, 14)
         panel_layout.setSpacing(12)
         
         # 标题
-        title_label = StrongBodyLabel("模型控制", panel)
+        title_label = BodyLabel("模型控制", panel)
         panel_layout.addWidget(title_label)
         
         # 标记当前是否为删除模式
@@ -288,12 +592,12 @@ class AIVoiceInterface(QFrame):
                 padding-left: 44px;
                 font-size: 13px;
                 font-weight: 500;
-                background-color: #fde7e9;
-                border: 1px solid #d13438;
-                color: #d13438;
+                background-color: #e8f3ff;
+                border: 1px solid #4f8edc;
+                color: #2b6cb0;
             }
             PushButton:hover {
-                background-color: #fdd3d6;
+                background-color: #d7ecff;
             }
         """
 
@@ -348,12 +652,13 @@ class AIVoiceInterface(QFrame):
         """创建音色参考音频卡片"""
         # 使用新的 AudioPlayerWidget (开启紧凑模式)
         self.ref_player_widget = AudioPlayerWidget("Voice Reference", self, compact_mode=True)
-        self.ref_player_widget.audio_dropped.connect(self._on_audio_dropped)
+        # self.ref_player_widget.audio_dropped.connect(self._on_audio_dropped)
+        try:
+            self.ref_player_widget.upload_requested.connect(self._on_import_audio)
+        except Exception:
+            pass
         
-        # 添加导入按钮到标题栏
-        self.ref_player_widget.add_tool_button(
-            FluentIcon.ADD, "导入参考音频", self._on_import_audio
-        )
+        # 移除“导入参考音频”加号按钮：上传交互由空状态提示/点击区域承担
         
         parent_layout.addWidget(self.ref_player_widget)
 
@@ -367,14 +672,35 @@ class AIVoiceInterface(QFrame):
         card_layout.setSpacing(12)
 
         # 标题
-        title = StrongBodyLabel("合成文本", card)
+        title = BodyLabel("合成文本", card)
         card_layout.addWidget(title)
 
         # 文本输入框（使用 qfluentwidgets 组件）
         self.text_edit = PlainTextEdit(card)
         self.text_edit.setPlaceholderText("在此输入要合成的文本内容...")
         self.text_edit.setMinimumHeight(120)
+        # 防止拖拽文件写入文本框：拖拽导入统一由界面 overlay 接管
+        try:
+            self.text_edit.setAcceptDrops(False)
+            # QPlainTextEdit / QTextEdit 的 viewport 可能仍然接收 drop
+            vp = getattr(self.text_edit, "viewport", None)
+            if callable(vp):
+                v = vp()
+                if v is not None:
+                    v.setAcceptDrops(False)
+        except Exception:
+            pass
         card_layout.addWidget(self.text_edit, 1)
+
+        # 生成按钮：放到合成文本卡片内部（输入框下方）
+        self.generate_btn = PrimaryPushButton(FluentIcon.SEND, "生成音频（Alt+Enter）", card)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setMinimumHeight(38)
+        try:
+            self.generate_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+        card_layout.addWidget(self.generate_btn)
 
         # 调整占比：改为 1，使三栏等宽 (1:1:1)
         parent_layout.addWidget(card, 1)
@@ -392,16 +718,37 @@ class AIVoiceInterface(QFrame):
         # 但 AudioPlayerWidget 本身有边框和阴影。
         # 方案：AudioPlayerWidget 放在 container 内部，去掉 container 的 padding
         
-        self.output_player_widget = AudioPlayerWidget("Synthesis Result", container)
+        # 上半部分：空状态/播放器（切换）
+        self._output_stack_host = QWidget(container)
+        self._output_stack = QStackedLayout(self._output_stack_host)
+        self._output_stack.setContentsMargins(0, 0, 0, 0)
+
+        # 空状态：仅显示一个音符图标（居中）
+        empty_view = QWidget(self._output_stack_host)
+        empty_layout = QVBoxLayout(empty_view)
+        empty_layout.setContentsMargins(0, 0, 0, 0)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._output_empty_icon = QLabel(empty_view)
+        try:
+            self._output_empty_icon.setPixmap(FluentIcon.MUSIC.icon().pixmap(22, 22))
+        except Exception:
+            self._output_empty_icon.setText("♪")
+        self._output_empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self._output_empty_icon)
+
+        self.output_player_widget = AudioPlayerWidget("Synthesis Result", self._output_stack_host)
         # 移除 AudioPlayerWidget 的边框和阴影，使其融入
         self.output_player_widget.setStyleSheet("CardWidget { border: none; background: transparent; }")
-        
         # 添加下载按钮
         self.output_player_widget.add_tool_button(
             FluentIcon.DOWNLOAD, "保存音频", self._on_download_audio
         )
-        
-        container_layout.addWidget(self.output_player_widget)
+
+        self._output_stack.addWidget(empty_view)
+        self._output_stack.addWidget(self.output_player_widget)
+        self._output_stack.setCurrentIndex(0)  # 默认空状态
+
+        container_layout.addWidget(self._output_stack_host)
         
         # 下半部分：控制区
         control_area = QWidget(container)
@@ -422,16 +769,21 @@ class AIVoiceInterface(QFrame):
         self.output_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.output_status_label.setStyleSheet("color: gray;")
         control_layout.addWidget(self.output_status_label)
-
-        # 生成按钮
-        self.generate_btn = PrimaryPushButton(FluentIcon.SEND, "生成音频", control_area)
-        self.generate_btn.setEnabled(False)
-        control_layout.addWidget(self.generate_btn)
         
         container_layout.addWidget(control_area)
         container_layout.addStretch()
         
         parent_layout.addWidget(container, 1)
+
+    def _set_output_empty_state(self, empty: bool):
+        """切换生成结果区域空状态（未生成时仅显示音符图标）。"""
+        try:
+            if empty:
+                self._output_stack.setCurrentIndex(0)
+            else:
+                self._output_stack.setCurrentIndex(1)
+        except Exception:
+            pass
 
     def _create_emotion_panel(self, parent_layout: QVBoxLayout):
         """创建情感控制面板"""
@@ -442,7 +794,7 @@ class AIVoiceInterface(QFrame):
         card_layout.setSpacing(12)
 
         # 标题
-        title = StrongBodyLabel("情感控制", card)
+        title = BodyLabel("情感控制", card)
         card_layout.addWidget(title)
 
         # 模式选择
@@ -508,6 +860,18 @@ class AIVoiceInterface(QFrame):
 
         # 生成音频
         self.generate_btn.clicked.connect(self._on_generate_clicked)
+
+        # 快捷键：Alt+Enter 生成（焦点在输入框时也可用）
+        try:
+            sc1 = QShortcut(QKeySequence(Qt.KeyboardModifier.AltModifier | Qt.Key.Key_Return), self)
+            sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc1.activated.connect(lambda: self._on_generate_clicked() if self.generate_btn.isEnabled() else None)
+
+            sc2 = QShortcut(QKeySequence(Qt.KeyboardModifier.AltModifier | Qt.Key.Key_Enter), self)
+            sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc2.activated.connect(lambda: self._on_generate_clicked() if self.generate_btn.isEnabled() else None)
+        except Exception:
+            pass
         # self.output_play_btn.clicked.connect(self._on_play_output)
         # self.download_audio_btn.clicked.connect(self._on_download_audio)
 
@@ -599,7 +963,7 @@ class AIVoiceInterface(QFrame):
 
         msg = MessageBox(
             "确认删除",
-            f"确定要删除角色「{character.name}」吗？\n此操作不可撤销。",
+            f"确定要删除角色「{character.name}」吗？\n删除后将从列表中移除。",
             self._main_window
         )
         if msg.exec():
@@ -657,11 +1021,35 @@ class AIVoiceInterface(QFrame):
         self._pending_save_dir = save_dir
 
         if self._is_delete_mode:
-            # 删除模式：删除依赖和模型
-            self._delete_model_files(save_dir)
+            # 删除模式：让用户选择删除模型 or 删除依赖
+            self._show_delete_assets_dialog(save_dir)
         else:
             # 下载模式：先检查环境，再下载模型
             self._start_async_env_check(save_dir)
+
+    def _show_delete_assets_dialog(self, save_dir: str):
+        """删除入口弹窗：将“删除模型”和“删除依赖”分离为两个按键。"""
+        # 检查模型是否已加载
+        if self._main_window.indextts_job.is_model_loaded:
+            InfoBar.warning(
+                title="请先卸载模型",
+                content="模型正在使用中，请先卸载模型后再删除",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3000
+            )
+            return
+
+        dialog = DeleteAssetsChoiceDialog(self._main_window, save_dir)
+        res = dialog.exec()
+
+        if dialog.choice == "delete_env":
+            # 新弹窗已经是确认，因此跳过二次确认
+            QTimer.singleShot(100, lambda: self._delete_env_only(skip_confirm=True))
+            return
+
+        if res and dialog.choice == "delete_model":
+            self._delete_model_files(save_dir)
 
     def _start_async_env_check(self, save_dir: str):
         """异步检查环境"""
@@ -730,6 +1118,7 @@ class AIVoiceInterface(QFrame):
             )
             msg_box.yesButton.setText("安装并下载")
             msg_box.cancelButton.setText("取消")
+            self._tune_message_box(msg_box)
             
             if msg_box.exec():
                 self._pending_save_dir = save_dir
@@ -787,52 +1176,18 @@ class AIVoiceInterface(QFrame):
             self._update_download_btn_state(is_complete=True)
             return
 
-        # 显示确认对话框
-        msg = MessageBox(
-            "准备下载模型",
-            f"环境依赖检测通过。\n\n即将下载模型文件到:\n{save_dir}\n\n文件大小约 5GB，请选择下载方式：",
-            self._main_window
-        )
-        msg.yesButton.setText("镜像下载 (推荐)")
-        msg.cancelButton.setText("取消")
-        
-        # 添加直连下载按钮
-        direct_btn = PushButton("直连下载")
-        msg.buttonLayout.insertWidget(1, direct_btn)
-        
-        # 添加删除环境依赖按钮
-        delete_env_btn = PushButton("删除环境依赖")
-        delete_env_btn.setStyleSheet("PushButton { color: #d13438; } PushButton:hover { background-color: #fde7e9; border: 1px solid #d13438; }")
-        msg.buttonLayout.insertWidget(2, delete_env_btn)
-        
-        # 用于捕获用户选择
-        choice = [None]
-        
-        def on_direct():
-            choice[0] = 'direct'
-            msg.accept()
-            
-        def on_delete_env():
-            choice[0] = 'delete_env'
-            msg.reject()
-            
-        direct_btn.clicked.connect(on_direct)
-        delete_env_btn.clicked.connect(on_delete_env)
+        dialog = DownloadModelChoiceDialog(self._main_window, save_dir)
+        res = dialog.exec()
 
-        res = msg.exec()
-        
-        if choice[0] == 'delete_env':
+        if dialog.choice == "delete_env":
             QTimer.singleShot(100, self._delete_env_only)
             return
 
         if res:
-            use_mirror = (choice[0] != 'direct')
-            # 开始下载
-            self._main_window.indextts_download_job.download_action(
-                save_dir, use_mirror=use_mirror
-            )
+            use_mirror = (dialog.choice != "direct")
+            self._main_window.indextts_download_job.download_action(save_dir, use_mirror=use_mirror)
 
-    def _delete_env_only(self):
+    def _delete_env_only(self, skip_confirm: bool = False):
         """仅删除 IndexTTS2 独立环境（Runtime/IndexTTS2/.venv），不删除模型文件。"""
         # 检查模型是否已加载
         if self._main_window.indextts_job.is_model_loaded:
@@ -845,25 +1200,27 @@ class AIVoiceInterface(QFrame):
             )
             return
 
-        msg = MessageBox(
-            "删除环境依赖",
-            "确定要删除 IndexTTS2 独立环境吗？\n\n"
-            "将删除: Runtime/IndexTTS2/.venv\n\n"
-            "模型文件（checkpoints）不会被删除。",
-            self._main_window
-        )
-        msg.yesButton.setText("确认删除")
-        msg.cancelButton.setText("取消")
+        if not skip_confirm:
+            msg = MessageBox(
+                "删除环境依赖",
+                "确定要删除 IndexTTS2 独立环境吗？\n\n"
+                "将删除: Runtime/IndexTTS2/.venv\n\n"
+                "模型文件（checkpoints）不会被删除。",
+                self._main_window
+            )
+            msg.yesButton.setText("确认删除")
+            msg.cancelButton.setText("取消")
+            self._tune_message_box(msg)
 
-        if not msg.exec():
-            return
+            if not msg.exec():
+                return
 
         self._main_window.indextts_env_job.uninstall_action()
         self._env_ready = False
         self._update_generate_btn_state()
 
     def _delete_model_files(self, save_dir: str):
-        """删除模型文件"""
+        """删除模型文件（不删除独立环境依赖）。"""
         # 检查模型是否已加载
         if self._main_window.indextts_job.is_model_loaded:
             InfoBar.warning(
@@ -875,31 +1232,7 @@ class AIVoiceInterface(QFrame):
             )
             return
 
-        # 确认删除
-        msg = MessageBox(
-            "删除依赖和模型",
-            f"确定要删除 AI 语音相关的依赖和模型文件吗？\n\n"
-            f"1. 删除模型目录: {save_dir}\n"
-            f"2. 删除 IndexTTS2 独立环境 (Runtime/IndexTTS2/.venv)\n\n"
-            f"此操作将删除约 5GB 的文件，且不可撤销。",
-            self._main_window
-        )
-        msg.yesButton.setText("确认删除")
-        msg.cancelButton.setText("取消")
-        
-        # 设置删除按钮为危险样式
-        msg.yesButton.setStyleSheet("""
-            PushButton {
-                background-color: #d13438;
-                color: white;
-            }
-            PushButton:hover {
-                background-color: #a4262c;
-            }
-        """)
-
-        if not msg.exec():
-            return
+        # 注意：确认弹窗在 _show_delete_assets_dialog 中已经执行，这里不再二次确认。
 
         # 收集要删除的文件
         files_to_delete = []
@@ -968,14 +1301,9 @@ class AIVoiceInterface(QFrame):
                 os.rmdir(save_dir)
 
             progress_window.close()
-            
-            # 3. 启动依赖卸载 Job
-            # 注意：这里应该调用 indextts_env_job 而不是 indextts_job
-            self._main_window.indextts_env_job.uninstall_action()
 
-            # 更新按钮状态 (假设卸载会成功，或者在 Job 完成回调中更新)
-            self._update_download_btn_state(is_complete=False)
-            self._env_ready = False
+            # 仅删除模型文件：保留独立环境，以便后续重新下载模型更快。
+            self._check_env_and_model()
             self._update_generate_btn_state()
 
         except Exception as e:
@@ -998,7 +1326,7 @@ class AIVoiceInterface(QFrame):
         if is_complete:
             # 切换为删除模式
             self._is_delete_mode = True
-            self.download_btn.setText("删除依赖和模型")
+            self.download_btn.setText("配置完成，点击可删除")
             self.download_btn.setIcon(FluentIcon.DELETE)
             self.download_btn.setToolTip("删除 IndexTTS2 的依赖和模型文件以释放磁盘空间")
             if hasattr(self, "_model_btn_icon_size"):
@@ -1108,8 +1436,8 @@ class AIVoiceInterface(QFrame):
         job = self._main_window.indextts_job
         
         if job.is_model_loaded:
-            self.load_model_btn.setText("卸载模型")
-            self.load_model_btn.setIcon(FluentIcon.CLOSE) # 使用关闭图标区分
+            self.load_model_btn.setText("加载完成，点击可卸载")
+            self.load_model_btn.setIcon(FluentIcon.ACCEPT)
             self.load_model_btn.setStyleSheet(self._load_btn_style_unload)
             self._model_ready = True
         else:
@@ -1318,6 +1646,7 @@ class AIVoiceInterface(QFrame):
         output_path = os.path.join(temp_dir, f"temp_{int(time.time())}.wav")
 
         # 开始生成
+        self._synthesis_in_progress = True
         self._main_window.indextts_job.synthesize_action(
             spk_audio_path=character.reference_audio_path,
             text=text,
@@ -1366,11 +1695,19 @@ class AIVoiceInterface(QFrame):
         self._update_model_status()
         self._update_generate_btn_state()
         self.generate_progress.setVisible(False)
+
+        # job_completed(True) 同时用于“模型加载完成”和“语音生成完成”。
+        # 只有当我们确实处于“合成中”时，才更新生成结果状态文本。
+        if not self._synthesis_in_progress:
+            return
+
+        self._synthesis_in_progress = False
         
         if success:
             wav_path = self._main_window.indextts_job.last_wav_path
             if wav_path and os.path.exists(wav_path):
                 self.output_player_widget.set_audio_path(wav_path)
+                self._set_output_empty_state(False)
                 self.output_status_label.setText("生成成功")
                 self.output_status_label.setStyleSheet("color: green;")
             else:
@@ -1426,8 +1763,10 @@ class AIVoiceInterface(QFrame):
         wav_path = self._main_window.indextts_job.last_wav_path
         if wav_path and os.path.exists(wav_path):
             self.output_player_widget.set_audio_path(wav_path)
+            self._set_output_empty_state(False)
         else:
             self.output_player_widget.set_audio_path("")
+            self._set_output_empty_state(True)
 
     def on_job_finished(self, success: bool):
         """Job 完成回调（由 MainWindow 调用）"""

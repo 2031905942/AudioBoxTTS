@@ -31,3 +31,9 @@ ENV/
 
 # SVN
 .svn/
+
+# IndexTTS2 (deps & models)
+Runtime/IndexTTS2/.venv/
+Runtime/IndexTTS2/.uv-cache/
+Runtime/IndexTTS2/.cache/
+checkpoints/
