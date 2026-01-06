@@ -1,39 +1,52 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual Environment
-venv/
-env/
-ENV/
-
-# VS Code
-.vscode/
-
-# SVN
-.svn/
-
 # IndexTTS2 (deps & models)
 Runtime/IndexTTS2/.venv/
 Runtime/IndexTTS2/.uv-cache/
 Runtime/IndexTTS2/.cache/
 checkpoints/
+
+# ----------------------------
+# Python / Tools cache (safe)
+# ----------------------------
+# Python 字节码与解释器缓存
+__pycache__/
+*.py[cod]
+
+# 测试/类型检查/格式化工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 通用本地缓存目录（例如某些库/下载器）
+.cache/
+.uv-cache/
+
+# 虚拟环境（本仓库根目录/子目录常见命名）
+.venv/
+venv/
+env/
+
+# IDE/编辑器配置（个人环境差异）
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# SVN 工作副本元数据（不应进入 git）
+.svn/
+
+# 本项目运行临时输出
+temp_output/
+
+# ----------------------------
+# Local user data (ignore)
+# ----------------------------
+# 本地角色列表覆盖文件：运行时生成，仅本地保留
+config/characters.json
+
+# ----------------------------
+# Keep embedded Python runtime
+# ----------------------------
+# 重要：不要忽略 Python3/ 里的任何东西（它是随项目分发的运行时）。
+# 下面两条用于“反向覆盖”前面任何可能命中的忽略规则。
+!Python3/
+!Python3/**

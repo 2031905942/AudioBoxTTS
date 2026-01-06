@@ -1,68 +1,35 @@
-# SVN 忽略文件说明
+## SVN 忽略说明
 
-本文档说明了在 SVN 提交时应该忽略的文件和目录。
+本文件用于记录建议在 SVN 中忽略的本地/缓存文件，避免把个人环境差异与运行生成物提交到仓库。
 
-## 必须忽略的目录/文件
+### 必须忽略（本地生成/个人数据）
 
-### 1. Python 缓存
+- `config/characters.json`
+	- 本地角色列表覆盖文件：当用户在默认列表上进行新增/编辑/删除等写操作时自动生成
+	- 每个人的内容不同，不应提交
+
+### 应提交（默认数据）
+
+- `config/characters.default.json`
+	- 默认角色列表：仓库应保留一个“开箱即用”的默认角色
+	- 新用户拉取后，在没有本地 `characters.json` 时会读取它
+
+### 建议忽略（缓存/临时输出）
+
 ```
 __pycache__/
 *.pyc
 *.pyo
-```
 
-### 2. 临时输出
-```
 temp_output/
-test_outputs/
-```
 
-### 3. 用户本地数据（重要！）
-```
-config/characters.json    # 用户创建的角色数据（每个人独立）
-```
+checkpoints/
+.venv/
 
-### 4. 大文件目录（建议忽略，通过其他方式分发）
-```
-checkpoints/              # IndexTTS2 模型文件 (~5GB)
-Python3/Lib/site-packages/ # Python 依赖包 (~3GB)
-```
-
-### 5. IDE 配置
-```
 .idea/
 .vscode/
 *.swp
 *.swo
 ```
 
-## SVN 忽略配置方法
-
-### 方法一：全局忽略（推荐）
-编辑 SVN 全局配置文件：
-- Windows: `%APPDATA%\Subversion\config`
-- Linux/Mac: `~/.subversion/config`
-
-在 `[miscellany]` 部分添加：
-```ini
-global-ignores = __pycache__ *.pyc *.pyo temp_output .idea .vscode
-```
-
-### 方法二：目录级忽略
-在特定目录上右键 → TortoiseSVN → Properties → New → svn:ignore
-
-### 方法三：使用 SmartSVN
-Project → Ignore Patterns
-
-## 关于大文件的处理建议
-
-1. **checkpoints/ (~5GB)**
-   - 建议：不纳入 SVN，由用户自行下载
-   - 替代方案：放到公司内网共享盘，新用户复制
-
-2. **Python3/Lib/site-packages/ (~3GB)**
-   - 建议：不纳入 SVN，由用户运行 install_indextts_deps.bat 安装
-   - 替代方案：打包成 zip 放到共享盘
-
-3. **config/characters.json**
-   - **必须忽略**：每个用户的角色是独立的，不应共享
+提示：SVN 的忽略规则需要通过 `svn:ignore` 属性或客户端（如 TortoiseSVN / SmartSVN）配置，本文件本身不会自动生效。
