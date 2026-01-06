@@ -398,13 +398,38 @@ print(json.dumps({"missing": missing}, ensure_ascii=False))
 
     @staticmethod
     def _parse_size_to_bytes(size_text: str) -> int:
-        """解析 uv 输出里的大小文本，如 4.5MiB / 3.2GiB。"""
-        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG]iB)\s*$", size_text)
+        """解析 uv 输出里的大小文本。
+
+        uv 不同版本/平台可能输出：
+        - 4.5MiB / 3.2GiB (IEC)
+        - 4.5 MB / 3.2 GB (SI)
+        - 1234B
+        """
+        s = (size_text or "").strip()
+        if not s:
+            return 0
+
+        # 允许："3.41GiB" / "3.41 GB" / "3.41GB" / "1234B"
+        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG]iB|[KMG]B|B)\s*$", s, flags=re.IGNORECASE)
         if not m:
             return 0
+
         num = float(m.group(1))
-        unit = m.group(2)
-        factor = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}.get(unit, 0)
+        unit = m.group(2).upper()
+
+        # 统一用 1024 进制，避免显示/估算差异过大
+        factors = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024**2,
+            "GB": 1024**3,
+            "KIB": 1024,
+            "MIB": 1024**2,
+            "GIB": 1024**3,
+        }
+        factor = factors.get(unit, 0)
+        if factor <= 0:
+            return 0
         return int(num * factor)
 
     def _run_uv_sync_with_smooth_progress(

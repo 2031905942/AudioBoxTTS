@@ -11,7 +11,7 @@ from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QVBoxLayout, QWidget, QSizePolicy, QStackedLayout, QLabel
+    QVBoxLayout, QWidget, QSizePolicy, QStackedLayout, QLabel, QDialog
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, InfoBar, InfoBarPosition,
@@ -244,6 +244,41 @@ class DownloadModelChoiceDialog(MessageBoxBase):
             self.widget.setMinimumWidth(720)
 
 
+class ModelDiagnosticsDialog(QDialog):
+    """模型诊断信息窗口（可关闭，用于调试）。"""
+
+    def __init__(self, parent, title: str, details: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        try:
+            self.setMinimumWidth(720)
+            self.setMinimumHeight(520)
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        header = BodyLabel(title, self)
+        layout.addWidget(header)
+
+        # 使用只读文本框承载详细信息（便于复制）
+        text = PlainTextEdit(self)
+        text.setReadOnly(True)
+        text.setPlainText(details)
+        layout.addWidget(text, 1)
+
+        btn_row = QWidget(self)
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.addStretch()
+        close_btn = PushButton("关闭", btn_row)
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        layout.addWidget(btn_row)
+
+
 class DeleteAssetsChoiceDialog(MessageBoxBase):
     """删除资源选择弹窗（避免 MessageBox 插入按钮导致重叠）。
 
@@ -253,7 +288,7 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
         - cancel: 取消
     """
 
-    def __init__(self, parent, save_dir: str):
+    def __init__(self, parent, save_dir: str, env_action: str = "delete"):
         super().__init__(parent)
         self.choice: str | None = None
 
@@ -286,7 +321,16 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
         grid.setVerticalSpacing(12)
 
         delete_model_btn = PrimaryPushButton(FluentIcon.DELETE, "删除模型文件", btn_grid_host)
-        delete_env_btn = PushButton(FluentIcon.DELETE, "删除环境依赖", btn_grid_host)
+
+        env_btn_icon = FluentIcon.DELETE
+        env_btn_text = "删除环境依赖"
+        env_choice_value = "delete_env"
+        if str(env_action).lower() == "download":
+            env_btn_icon = FluentIcon.DOWNLOAD
+            env_btn_text = "下载环境依赖"
+            env_choice_value = "download_env"
+
+        delete_env_btn = PushButton(env_btn_icon, env_btn_text, btn_grid_host)
         cancel_btn = PushButton("取消", btn_grid_host)
 
         for b in (delete_model_btn, delete_env_btn, cancel_btn):
@@ -313,7 +357,7 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
                 self.reject()
 
         delete_model_btn.clicked.connect(lambda: _pick("delete_model", True))
-        delete_env_btn.clicked.connect(lambda: _pick("delete_env", False))
+        delete_env_btn.clicked.connect(lambda: _pick(env_choice_value, False))
         cancel_btn.clicked.connect(lambda: _pick("cancel", False))
 
         try:
@@ -531,9 +575,34 @@ class AIVoiceInterface(QFrame):
         panel_layout.setContentsMargins(16, 14, 16, 14)
         panel_layout.setSpacing(12)
         
-        # 标题
-        title_label = BodyLabel("模型控制", panel)
-        panel_layout.addWidget(title_label)
+        # 标题（模型加载后可点击查看诊断信息）
+        self.model_control_title_btn = PushButton("模型控制", panel)
+        self.model_control_title_btn.setEnabled(False)
+        self.model_control_title_btn.setToolTip("")
+        self.model_control_title_btn.setStyleSheet(
+            """
+            PushButton {
+                border: none;
+                padding: 0px;
+                background: transparent;
+                text-align: left;
+            }
+            PushButton:disabled {
+                border: none;
+                padding: 0px;
+                background: transparent;
+            }
+            PushButton:hover:!disabled {
+                text-decoration: underline;
+            }
+            """
+        )
+        try:
+            self.model_control_title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        except Exception:
+            pass
+        self.model_control_title_btn.clicked.connect(self._on_model_title_clicked)
+        panel_layout.addWidget(self.model_control_title_btn)
         
         # 标记当前是否为删除模式
         self._is_delete_mode = False
@@ -1020,12 +1089,30 @@ class AIVoiceInterface(QFrame):
         # 保存路径以防万一
         self._pending_save_dir = save_dir
 
+        # 若模型齐全但环境缺失：提供“下载环境依赖”入口（保持弹窗样式一致）
+        if getattr(self, "_model_files_ok", False) and (not getattr(self, "_env_ok_fast", False)):
+            self._show_fix_env_dialog(save_dir)
+            return
+
         if self._is_delete_mode:
             # 删除模式：让用户选择删除模型 or 删除依赖
             self._show_delete_assets_dialog(save_dir)
-        else:
-            # 下载模式：先检查环境，再下载模型
-            self._start_async_env_check(save_dir)
+            return
+
+        # 下载模式：先检查环境，再下载模型
+        self._start_async_env_check(save_dir)
+
+    def _show_fix_env_dialog(self, save_dir: str):
+        """环境缺失但模型齐全时的弹窗入口：提供“下载环境依赖”按钮。"""
+        dialog = DeleteAssetsChoiceDialog(self._main_window, save_dir, env_action="download")
+        res = dialog.exec()
+
+        if dialog.choice == "download_env":
+            QTimer.singleShot(100, self._download_env_only)
+            return
+
+        if res and dialog.choice == "delete_model":
+            self._delete_model_files(save_dir)
 
     def _show_delete_assets_dialog(self, save_dir: str):
         """删除入口弹窗：将“删除模型”和“删除依赖”分离为两个按键。"""
@@ -1050,6 +1137,22 @@ class AIVoiceInterface(QFrame):
 
         if res and dialog.choice == "delete_model":
             self._delete_model_files(save_dir)
+
+    def _download_env_only(self):
+        """仅安装 IndexTTS2 独立环境依赖（Runtime/IndexTTS2/.venv）。"""
+        try:
+            from PySide6.QtCore import Qt
+
+            self._main_window.indextts_env_job.job_completed.connect(
+                self._on_env_job_finished, Qt.ConnectionType.UniqueConnection
+            )
+        except Exception:
+            try:
+                self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
+            except Exception:
+                pass
+
+        self._main_window.indextts_env_job.install_action()
 
     def _start_async_env_check(self, save_dir: str):
         """异步检查环境"""
@@ -1145,6 +1248,10 @@ class AIVoiceInterface(QFrame):
 
     def _on_env_job_finished(self, success: bool):
         """环境安装完成回调"""
+        # 安装/卸载完成后，刷新按钮与生成状态
+        self._check_env_and_model()
+        self._update_generate_btn_state()
+
         if success:
             # 环境安装成功，继续下载模型
             if hasattr(self, '_pending_save_dir') and self._pending_save_dir:
@@ -1173,7 +1280,8 @@ class AIVoiceInterface(QFrame):
                 position=InfoBarPosition.TOP,
                 duration=3000
             )
-            self._update_download_btn_state(is_complete=True)
+            # 刷新按钮状态：模型齐全后还需结合环境是否存在
+            self._check_env_and_model()
             return
 
         dialog = DownloadModelChoiceDialog(self._main_window, save_dir)
@@ -1218,6 +1326,19 @@ class AIVoiceInterface(QFrame):
         self._main_window.indextts_env_job.uninstall_action()
         self._env_ready = False
         self._update_generate_btn_state()
+
+        # 卸载结束后刷新界面状态（避免按钮文案不更新）
+        try:
+            from PySide6.QtCore import Qt
+
+            self._main_window.indextts_env_job.job_completed.connect(
+                self._on_env_job_finished, Qt.ConnectionType.UniqueConnection
+            )
+        except Exception:
+            try:
+                self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
+            except Exception:
+                pass
 
     def _delete_model_files(self, save_dir: str):
         """删除模型文件（不删除独立环境依赖）。"""
@@ -1317,14 +1438,19 @@ class AIVoiceInterface(QFrame):
             )
             
             # 更新按钮状态
-            self._update_download_btn_state(is_complete=False)
+            self._check_env_and_model()
             self._env_ready = False
             self._update_generate_btn_state()
 
-    def _update_download_btn_state(self, is_complete: bool):
-        """更新下载/删除按钮状态"""
-        if is_complete:
-            # 切换为删除模式
+    def _update_download_btn_state(self, env_ok: bool, model_ok: bool):
+        """更新下载/删除按钮状态
+
+        - env_ok & model_ok: 配置完成 -> 删除入口
+        - !env_ok & model_ok: 缺乏依赖（仅环境缺失）-> 保持黄色样式，提供下载环境依赖入口
+        - otherwise: 下载依赖和模型
+        """
+        # 1) 配置完成：允许删除
+        if env_ok and model_ok:
             self._is_delete_mode = True
             self.download_btn.setText("配置完成，点击可删除")
             self.download_btn.setIcon(FluentIcon.DELETE)
@@ -1332,15 +1458,28 @@ class AIVoiceInterface(QFrame):
             if hasattr(self, "_model_btn_icon_size"):
                 self.download_btn.setIconSize(self._model_btn_icon_size)
             self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_delete", ""))
-        else:
-            # 切换为下载模式
+            return
+
+        # 2) 仅环境缺失：保持黄色样式，但引导下载环境依赖
+        if (not env_ok) and model_ok:
             self._is_delete_mode = False
-            self.download_btn.setText("下载依赖和模型")
+            self.download_btn.setText("缺乏依赖，点击可下载")
             self.download_btn.setIcon(FluentIcon.DOWNLOAD)
-            self.download_btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
+            self.download_btn.setToolTip("检测到环境依赖缺失，点击可下载/安装环境依赖")
             if hasattr(self, "_model_btn_icon_size"):
                 self.download_btn.setIconSize(self._model_btn_icon_size)
-            self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_download", ""))
+            # 复用当前“配置完成”黄色样式
+            self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_delete", ""))
+            return
+
+        # 3) 其余情况：下载依赖和模型
+        self._is_delete_mode = False
+        self.download_btn.setText("下载依赖和模型")
+        self.download_btn.setIcon(FluentIcon.DOWNLOAD)
+        self.download_btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
+        if hasattr(self, "_model_btn_icon_size"):
+            self.download_btn.setIconSize(self._model_btn_icon_size)
+        self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_download", ""))
 
     def _on_load_model_clicked(self):
         """加载/卸载模型"""
@@ -1440,14 +1579,172 @@ class AIVoiceInterface(QFrame):
             self.load_model_btn.setIcon(FluentIcon.ACCEPT)
             self.load_model_btn.setStyleSheet(self._load_btn_style_unload)
             self._model_ready = True
+
+            # 标题切换为“使用中 + 设备信息”，并允许点击查看详情
+            try:
+                device = getattr(job, "device", "")
+                device = device() if callable(device) else device
+            except Exception:
+                device = ""
+
+            device_text = str(device).strip() if device else "未知"
+            self.model_control_title_btn.setText(f"模型正在使用中，使用设备：{device_text}")
+            self.model_control_title_btn.setEnabled(True)
+            self.model_control_title_btn.setToolTip("点击查看更详细的模型/显存信息")
         else:
             self.load_model_btn.setText("加载模型")
             self.load_model_btn.setIcon(FluentIcon.PLAY)
             self.load_model_btn.setStyleSheet(self._load_btn_style)
             self._model_ready = False
+
+            # 未加载时恢复普通标题且不响应点击
+            self.model_control_title_btn.setText("模型控制")
+            self.model_control_title_btn.setEnabled(False)
+            self.model_control_title_btn.setToolTip("")
         
         self.load_model_btn.setEnabled(True)
         self._update_generate_btn_state()
+
+    def _run_nvidia_smi(self) -> dict:
+        """尝试通过 nvidia-smi 获取 CUDA/显存信息。
+
+        返回 dict，可能为空（例如没有 NVIDIA 驱动/命令）。
+        """
+        try:
+            import subprocess
+
+            # 1) 获取 CUDA 版本（nvidia-smi 顶部行包含 CUDA Version）
+            p = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            out = (p.stdout or "").splitlines()
+            cuda_ver = ""
+            driver_ver = ""
+            if out:
+                # 示例：| NVIDIA-SMI 555.85 ... CUDA Version: 12.5 |
+                first = out[0]
+                if "CUDA Version" in first:
+                    try:
+                        cuda_ver = first.split("CUDA Version:", 1)[1].split("|")[0].strip()
+                    except Exception:
+                        cuda_ver = ""
+                if "NVIDIA-SMI" in first:
+                    try:
+                        # NVIDIA-SMI 后面的版本号
+                        driver_ver = first.split("NVIDIA-SMI", 1)[1].strip().split()[0]
+                    except Exception:
+                        driver_ver = ""
+
+            # 2) GPU 名称 + 显存（首张卡）
+            q = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total,memory.used,memory.free",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            row = (q.stdout or "").strip().splitlines()
+            gpu_name = ""
+            mem_total = ""
+            mem_used = ""
+            mem_free = ""
+            if row:
+                parts = [p.strip() for p in row[0].split(",")]
+                if len(parts) >= 4:
+                    gpu_name, mem_total, mem_used, mem_free = parts[:4]
+
+            return {
+                "cuda_version": cuda_ver,
+                "driver_version": driver_ver,
+                "gpu_name": gpu_name,
+                "mem_total_mb": mem_total,
+                "mem_used_mb": mem_used,
+                "mem_free_mb": mem_free,
+            }
+        except Exception:
+            return {}
+
+    def _on_model_title_clicked(self):
+        """点击标题：展示模型诊断信息。"""
+        job = self._main_window.indextts_job
+        if not job.is_model_loaded:
+            return
+
+        # Job/engine 信息
+        try:
+            device = job.device
+        except Exception:
+            device = ""
+        device_text = str(device).strip() if device else "未知"
+
+        model_dir = ""
+        engine_pid = ""
+        engine_alive = ""
+        stderr_tail = ""
+        try:
+            util = getattr(job, "_utility", None)
+            if util is not None:
+                model_dir = getattr(util, "model_dir", "") or ""
+                proc = getattr(util, "_engine_proc", None)
+                if proc is not None:
+                    try:
+                        engine_pid = str(proc.pid)
+                    except Exception:
+                        engine_pid = ""
+                    try:
+                        engine_alive = "是" if (proc.poll() is None) else "否"
+                    except Exception:
+                        engine_alive = ""
+
+                tail = getattr(util, "_engine_stderr_tail", None)
+                if isinstance(tail, list) and tail:
+                    stderr_tail = "\n".join([str(x) for x in tail[-60:]])
+        except Exception:
+            pass
+
+        # GPU/CUDA 信息
+        smi = self._run_nvidia_smi()
+
+        lines = []
+        lines.append("基础")
+        lines.append(f"- 设备: {device_text}")
+        if model_dir:
+            lines.append(f"- 模型目录: {model_dir}")
+        if engine_pid:
+            lines.append(f"- 引擎进程 PID: {engine_pid}")
+        if engine_alive:
+            lines.append(f"- 引擎存活: {engine_alive}")
+
+        lines.append("")
+        lines.append("CUDA / 显存（来自 nvidia-smi，若可用）")
+        if smi:
+            if smi.get("gpu_name"):
+                lines.append(f"- GPU: {smi.get('gpu_name')}")
+            if smi.get("driver_version"):
+                lines.append(f"- NVIDIA-SMI: {smi.get('driver_version')}")
+            if smi.get("cuda_version"):
+                lines.append(f"- CUDA Version: {smi.get('cuda_version')}")
+            if smi.get("mem_total_mb"):
+                lines.append(
+                    f"- 显存(MB): 已用 {smi.get('mem_used_mb')}/{smi.get('mem_total_mb')}，剩余 {smi.get('mem_free_mb')}"
+                )
+        else:
+            lines.append("- 未检测到 nvidia-smi 或读取失败")
+
+        if stderr_tail:
+            lines.append("")
+            lines.append("引擎日志尾部（stderr tail）")
+            lines.append(stderr_tail)
+
+        details = "\n".join(lines)
+        dlg = ModelDiagnosticsDialog(self, "模型详细信息", details)
+        dlg.exec()
 
     # ==================== 音频操作 ====================
 
@@ -1670,14 +1967,21 @@ class AIVoiceInterface(QFrame):
         """更新生成按钮状态"""
         character = self._character_manager.selected_character
         job = self._main_window.indextts_job
-        
-        can_generate = (
-            job.is_model_loaded and
-            character is not None and
-            character.reference_audio_path and
-            os.path.exists(character.reference_audio_path)
+
+        ref_audio = ""
+        try:
+            if character is not None and character.reference_audio_path:
+                ref_audio = str(character.reference_audio_path)
+        except Exception:
+            ref_audio = ""
+
+        can_generate = bool(
+            job.is_model_loaded
+            and character is not None
+            and ref_audio
+            and os.path.exists(ref_audio)
         )
-        self.generate_btn.setEnabled(can_generate)
+        self.generate_btn.setEnabled(bool(can_generate))
 
     # ==================== 进度回调 ====================
 
@@ -1740,13 +2044,17 @@ class AIVoiceInterface(QFrame):
 
         # 检查模型文件
         model_dir = IndexTTSUtility.get_default_model_dir()
-        is_complete, _ = IndexTTSUtility.check_model_files(model_dir)
+        model_ok, _ = IndexTTSUtility.check_model_files(model_dir)
+
+        # 记录快照，供点击逻辑使用
+        self._env_ok_fast = bool(env_ok)
+        self._model_files_ok = bool(model_ok)
         
         # 更新下载/删除按钮状态（若正在异步检测，不覆盖按钮文案/禁用状态）
         if not self._env_check_pending:
-            self._update_download_btn_state(is_complete)
+            self._update_download_btn_state(bool(env_ok), bool(model_ok))
             self.download_btn.setEnabled(True)
-        self._env_ready = bool(env_ok and is_complete)
+        self._env_ready = bool(env_ok and model_ok)
 
         # 更新模型状态
         self._update_model_status()

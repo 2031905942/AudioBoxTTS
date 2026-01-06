@@ -4,6 +4,7 @@ IndexTTS2 推理 Job
 负责线程管理、进度窗口、错误提示与结果回传。
 """
 import os
+import warnings
 from typing import Optional, List
 
 from PySide6.QtCore import Signal
@@ -105,35 +106,31 @@ class IndexTTSJob(BaseJob):
             self._utility = IndexTTSUtility()
             self._is_model_loaded = False
 
-        # 连接信号：使用 disconnect()（不带 slot）来避免“未连接却 disconnect(slot)”导致的 RuntimeWarning
-        try:
-            self.load_model_signal.disconnect()
-        except Exception:
-            pass
-        try:
-            self.synthesize_signal.disconnect()
-        except Exception:
-            pass
+        def _safe_disconnect(sig):
+            """Qt 信号断开连接：若未连接则不输出 RuntimeWarning。"""
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        category=RuntimeWarning,
+                        message=r"Failed to disconnect.*",
+                    )
+                    sig.disconnect()
+            except Exception:
+                # 包含: TypeError/RuntimeError 等
+                pass
+
+        # 断开旧连接，避免重复触发或引用旧 utility
+        _safe_disconnect(self.load_model_signal)
+        _safe_disconnect(self.synthesize_signal)
 
         self.load_model_signal.connect(self._utility.load_model)
         self.synthesize_signal.connect(self._utility.synthesize)
 
-        try:
-            self._utility.update_progress_signal.disconnect()
-        except Exception:
-            pass
-        try:
-            self._utility.error_signal.disconnect()
-        except Exception:
-            pass
-        try:
-            self._utility.generated_signal.disconnect()
-        except Exception:
-            pass
-        try:
-            self._utility.model_loaded_signal.disconnect()
-        except Exception:
-            pass
+        _safe_disconnect(self._utility.update_progress_signal)
+        _safe_disconnect(self._utility.error_signal)
+        _safe_disconnect(self._utility.generated_signal)
+        _safe_disconnect(self._utility.model_loaded_signal)
 
         self._utility.update_progress_signal.connect(self._on_progress_update)
         self._utility.error_signal.connect(self._on_error)
