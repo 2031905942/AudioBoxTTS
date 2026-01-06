@@ -20,10 +20,13 @@ class IndexTTSJob(BaseJob):
     # 信号定义
     load_model_signal = Signal(str, bool, bool, bool)  # model_dir, fp16, cuda_kernel, deepspeed
     synthesize_signal = Signal(str, str, str, int, list, float)  # spk_audio, text, output, emo_mode, emo_vec, emo_weight
+    synthesize_variants_signal = Signal(str, str, list, int, list, float)  # spk_audio, text, output_paths, emo_mode, emo_vec, emo_weight
     
     # UI 更新信号（用于通知界面更新进度和状态）
     progress_updated = Signal(float, str)  # progress (0.0-1.0), description
     job_completed = Signal(bool)  # success
+    variant_generated = Signal(int, str)  # index, wav_path
+    variant_progress = Signal(int, float, str)  # index, progress(0-1), desc
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -58,6 +61,7 @@ class IndexTTSJob(BaseJob):
         self._create_utility()
         self._utility.moveToThread(self.worker_thread)
 
+        # 模型加载：保持“禁用主窗口 + 弹出进度环”逻辑
         self.start_worker()
         self._create_progress_ring_window("模型加载")
         self._progress_ring_window.set_text("准备加载模型...")
@@ -88,13 +92,46 @@ class IndexTTSJob(BaseJob):
         # 复用已有的 utility（模型已加载）
         self._utility.moveToThread(self.worker_thread)
 
-        self.start_worker()
-        self._create_progress_ring_window("语音合成")
-        self._progress_ring_window.set_text("准备合成...")
+        # 语音合成：不禁用整个主窗口，不再弹出 ProgressRingWindow
+        self.worker_thread.start()
 
         # 传递参数
         vec = emo_vector if emo_vector else [0.0] * 8
         self.synthesize_signal.emit(spk_audio_path, text, output_path, emo_mode, vec, emo_weight)
+
+    def synthesize_variants_action(self, spk_audio_path: str, text: str, output_paths: List[str],
+                                  emo_mode: int = 0, emo_vector: Optional[List[float]] = None,
+                                  emo_weight: float = 1.0):
+        """合成语音（一次生成多个候选样本）。
+
+        Args:
+            spk_audio_path: 音色参考音频路径
+            text: 要合成的文本
+            output_paths: 输出 wav 路径列表（建议长度为 3）
+            emo_mode: 情感模式
+            emo_vector: 情感向量
+            emo_weight: 情感权重
+        """
+        if self.worker_thread.isRunning():
+            self.show_error_info_bar("任务进行中，请稍候")
+            return
+
+        if not self.is_model_loaded:
+            self.show_error_info_bar("请先加载模型")
+            return
+
+        if not output_paths or not isinstance(output_paths, list):
+            self.show_error_info_bar("输出路径无效")
+            return
+
+        # 复用已有的 utility（模型已加载）
+        self._utility.moveToThread(self.worker_thread)
+
+        # 语音合成：不禁用整个主窗口，不再弹出 ProgressRingWindow
+        self.worker_thread.start()
+
+        vec = emo_vector if emo_vector else [0.0] * 8
+        self.synthesize_variants_signal.emit(spk_audio_path, text, output_paths, emo_mode, vec, emo_weight)
 
     def _create_utility(self):
         """创建 Utility 实例并连接信号"""
@@ -123,19 +160,53 @@ class IndexTTSJob(BaseJob):
         # 断开旧连接，避免重复触发或引用旧 utility
         _safe_disconnect(self.load_model_signal)
         _safe_disconnect(self.synthesize_signal)
+        _safe_disconnect(self.synthesize_variants_signal)
 
         self.load_model_signal.connect(self._utility.load_model)
         self.synthesize_signal.connect(self._utility.synthesize)
+        self.synthesize_variants_signal.connect(self._utility.synthesize_variants)
 
         _safe_disconnect(self._utility.update_progress_signal)
         _safe_disconnect(self._utility.error_signal)
         _safe_disconnect(self._utility.generated_signal)
+        _safe_disconnect(getattr(self._utility, "variant_generated_signal", self._utility.generated_signal))
+        _safe_disconnect(getattr(self._utility, "variant_progress_signal", self._utility.generated_signal))
+        _safe_disconnect(getattr(self._utility, "variants_done_signal", self._utility.generated_signal))
         _safe_disconnect(self._utility.model_loaded_signal)
 
         self._utility.update_progress_signal.connect(self._on_progress_update)
         self._utility.error_signal.connect(self._on_error)
         self._utility.generated_signal.connect(self._on_generated)
+        self._utility.variant_generated_signal.connect(self._on_variant_generated)
+        self._utility.variant_progress_signal.connect(self._on_variant_progress)
+        self._utility.variants_done_signal.connect(self._on_variants_done)
         self._utility.model_loaded_signal.connect(self._on_model_loaded)
+
+    def _on_variant_generated(self, index: int, wav_path: str, sample_rate: int):
+        """某个候选样本生成完成回调（3 样本流程）。"""
+        self._last_wav_path = wav_path
+        self.variant_generated.emit(int(index), str(wav_path))
+
+    def _on_variant_progress(self, index: int, progress: float, desc: str):
+        """某个候选样本的实时进度回调。"""
+        self.variant_progress.emit(int(index), float(progress), str(desc or ""))
+
+    def _on_variants_done(self, wav_paths: List[str], sample_rate: int):
+        """所有候选样本生成完成回调。"""
+        try:
+            if wav_paths:
+                self._last_wav_path = wav_paths[-1]
+        except Exception:
+            pass
+        self.worker_thread.quit()
+        tail = ""
+        try:
+            tail = os.path.basename(self._last_wav_path) if self._last_wav_path else ""
+        except Exception:
+            tail = ""
+        msg = f"已生成 3 个样本{('，最后: ' + tail) if tail else ''} ({int(sample_rate)}Hz)"
+        self.job_finish("IndexTTS", msg, "success")
+        self.job_completed.emit(True)
 
     def _create_progress_ring_window(self, title: str = "处理中"):
         """创建进度环窗口"""

@@ -69,6 +69,9 @@ def _handle_synthesize(payload: Dict[str, Any], state: Dict[str, Any]) -> None:
     emo_vector = payload.get("emo_vector")
     emo_alpha = float(payload.get("emo_alpha", 1.0))
 
+    generation_kwargs = payload.get("generation_kwargs")
+    max_text_tokens_per_segment = payload.get("max_text_tokens_per_segment")
+
     if not spk_audio_prompt or not os.path.exists(spk_audio_prompt):
         _emit({"type": "error", "message": "参考音频不存在"})
         return
@@ -90,6 +93,15 @@ def _handle_synthesize(payload: Dict[str, Any], state: Dict[str, Any]) -> None:
             "output_path": output_path,
             "verbose": False,
         }
+
+        # 高级参数（可选）：由 GUI 下发
+        if isinstance(generation_kwargs, dict) and generation_kwargs:
+            kwargs["generation_kwargs"] = generation_kwargs
+        if max_text_tokens_per_segment is not None:
+            try:
+                kwargs["max_text_tokens_per_segment"] = int(max_text_tokens_per_segment)
+            except Exception:
+                pass
 
         # 0: same-as-speaker (do nothing)
         # 2: vector mode

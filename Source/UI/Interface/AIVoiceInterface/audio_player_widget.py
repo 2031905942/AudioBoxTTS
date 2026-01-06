@@ -1,4 +1,5 @@
 import os
+import math
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QSize, QPoint
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     CardWidget, FluentIcon, TransparentToolButton, 
-    BodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition
+    BodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition, ProgressBar
 )
 
 
@@ -97,6 +98,12 @@ class WaveformWidget(QWidget):
         self._color_played = QColor("#ff6b00")  # 已播放颜色 (橙色)
         self._color_remaining = QColor("#e0e0e0")  # 未播放颜色 (浅灰)
         self._cursor_color = QColor("#9c27b0")  # 光标颜色 (紫色)
+
+        self._duration_ms: int = 0
+        self._position_ms: int = 0
+        self._show_timestamps: bool = False
+        # 时间戳区域高度（会在 paintEvent 中根据字体动态兜底）
+        self._timestamp_area_h: int = 16
         
         # 默认显示一些随机数据，避免空白
         self._generate_dummy_data()
@@ -152,12 +159,63 @@ class WaveformWidget(QWidget):
         self._progress = max(0.0, min(1.0, progress))
         self.update()
 
+    def set_duration_ms(self, duration_ms: int):
+        self._duration_ms = max(0, int(duration_ms or 0))
+        self.update()
+
+    def set_position_ms(self, position_ms: int):
+        self._position_ms = max(0, int(position_ms or 0))
+        self.update()
+
+    def set_timestamps_enabled(self, enabled: bool):
+        self._show_timestamps = bool(enabled)
+        self.update()
+
+    def set_timestamp_area_height(self, px: int):
+        """设置时间戳区域高度（像素）。"""
+        try:
+            self._timestamp_area_h = max(10, int(px))
+        except Exception:
+            self._timestamp_area_h = 16
+        self.update()
+
+    def apply_monochrome(self, enabled: bool = True):
+        """将波形颜色切换为黑白系（根据 palette 自动适配）。"""
+        if not enabled:
+            self._color_played = QColor("#ff6b00")
+            self._color_remaining = QColor("#e0e0e0")
+            self._cursor_color = QColor("#9c27b0")
+            self.update()
+            return
+
+        text = self.palette().color(self.foregroundRole())
+        self._color_played = QColor(text)
+        self._color_played.setAlpha(220)
+
+        self._color_remaining = QColor(text)
+        self._color_remaining.setAlpha(60)
+
+        self._cursor_color = QColor(text)
+        self._cursor_color.setAlpha(200)
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         w = self.width()
         h = self.height()
+
+        timestamp_h = 0
+        bar_area_h = h
+        if self._show_timestamps:
+            # 根据当前字体高度动态兜底，避免高 DPI 下文字被裁剪
+            font = QFont(self.font())
+            font.setPointSize(max(8, font.pointSize() - 2))
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            timestamp_h = max(int(self._timestamp_area_h), int(metrics.height() + 2))
+            bar_area_h = max(1, h - timestamp_h)
         
         # 计算每个条形的宽度
         total_spacing = (self._bar_count - 1) * self._bar_spacing
@@ -166,8 +224,8 @@ class WaveformWidget(QWidget):
         # 绘制条形
         for i, value in enumerate(self._bars):
             x = i * (bar_width + self._bar_spacing)
-            bar_height = max(4, value * h)  # 最小高度 4px
-            y = (h - bar_height) / 2
+            bar_height = max(4, value * bar_area_h)  # 最小高度 4px
+            y = (bar_area_h - bar_height) / 2
             
             # 确定颜色
             bar_center_x = x + bar_width / 2
@@ -184,7 +242,35 @@ class WaveformWidget(QWidget):
         # 绘制光标线
         cursor_x = self._progress * w
         painter.setPen(QPen(self._cursor_color, 2))
-        painter.drawLine(cursor_x, 0, cursor_x, h)
+        painter.drawLine(cursor_x, 0, cursor_x, bar_area_h)
+
+        # 时间戳（紧凑模式使用）：左 0:00，右 总时长，光标处 当前时间
+        if self._show_timestamps:
+            timestamp_y = bar_area_h
+            text_color = QColor(self.palette().color(self.foregroundRole()))
+            text_color.setAlpha(150)
+            painter.setPen(QPen(text_color))
+
+            def _fmt(ms: int) -> str:
+                s = int(ms // 1000)
+                return f"{s // 60}:{s % 60:02d}"
+
+            total_text = _fmt(self._duration_ms) if self._duration_ms > 0 else ""
+            left_text = "0:00" if self._duration_ms > 0 else ""
+            current_text = _fmt(self._position_ms) if self._duration_ms > 0 else ""
+
+            if left_text:
+                painter.drawText(0, timestamp_y, w, timestamp_h, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_text)
+            if total_text:
+                painter.drawText(0, timestamp_y, w, timestamp_h, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, total_text)
+
+            if current_text:
+                # 在光标附近绘制当前时间，避免超出边界
+                metrics = painter.fontMetrics()
+                text_w = metrics.horizontalAdvance(current_text)
+                x0 = int(cursor_x - text_w / 2)
+                x0 = max(0, min(w - text_w, x0))
+                painter.drawText(x0, timestamp_y, text_w, timestamp_h, Qt.AlignmentFlag.AlignCenter, current_text)
 
 
 class AudioPlayerWidget(CardWidget):
@@ -194,70 +280,121 @@ class AudioPlayerWidget(CardWidget):
     play_requested = Signal()
     pause_requested = Signal()
     upload_requested = Signal()  # 空状态点击上传
+    clear_requested = Signal()   # 请求清空音频（右上角叉号）
     
-    def __init__(self, title="Audio Player", parent=None, compact_mode=False):
+    def __init__(
+        self,
+        title="Audio Player",
+        parent=None,
+        compact_mode=False,
+        *,
+        compact_empty_hint: str = "upload",
+        show_clear_button: bool = True,
+        clear_tooltip: str = "移除音频",
+        title_follows_filename: bool = True,
+    ):
         super().__init__(parent)
         self._audio_path = ""
         self._duration = 0
         self._is_playing = False
         self._compact_mode = compact_mode
+        # 紧凑模式空态提示："upload"(参考音频) / "none"(输出样本)
+        self._compact_empty_hint = (compact_empty_hint or "upload").strip().lower()
+        self._show_clear_button = bool(show_clear_button)
+        self._clear_tooltip = str(clear_tooltip)
+        self._title_follows_filename = bool(title_follows_filename)
+        self._base_title_text = str(title)
+
+        self._tool_buttons = []
+        self._loading = False
+        self._loading_overlay = None
         
         self._init_ui(title)
         self._init_player()
         
     def _init_ui(self, title_text):
         if self._compact_mode:
-            self.setFixedHeight(80)
+            # 不要用过小 fixed height（高 DPI / 字体变化会导致内部控件被压扁重叠）
+            self.setMinimumHeight(112)
             self.setMinimumWidth(300)
-            
-            # 紧凑模式：水平布局
-            self.main_layout = QHBoxLayout(self)
-            self.main_layout.setContentsMargins(16, 10, 16, 10)
-            self.main_layout.setSpacing(12)
-            
-            # 1. 标题/文件名 (左侧)
-            self.title_label = BodyLabel(title_text, self)
-            self.main_layout.addWidget(self.title_label)
-            
-            # 工具栏区域 (紧跟标题之后，或者放在最右侧？放在标题后比较合理，方便操作)
-            self.tool_bar_layout = QHBoxLayout()
-            self.tool_bar_layout.setSpacing(4)
-            self.main_layout.addLayout(self.tool_bar_layout)
-            
-            # 2. 中间区域：空状态提示 / 波形显示（切换）
-            self._center_host = QWidget(self)
-            self._center_stack = QStackedLayout(self._center_host)
-            self._center_stack.setContentsMargins(0, 0, 0, 0)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-            self._empty_hint = _UploadHintWidget(self._center_host)
-            self._empty_hint.clicked.connect(self.upload_requested.emit)
-            self._center_stack.addWidget(self._empty_hint)
+            # 紧凑模式：上方弱化文件名 + 右上角清空；下方波形 + 播放
+            self.main_layout = QVBoxLayout(self)
+            self.main_layout.setContentsMargins(12, 10, 12, 10)
+            self.main_layout.setSpacing(6)
+
+            header_layout = QHBoxLayout()
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(6)
+
+            # 文件名：弱化、放左上角
+            self.title_label = CaptionLabel(title_text, self)
+            self.title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            header_layout.addWidget(self.title_label, 1)
+
+            # 紧凑模式工具按钮区域（例如下载）
+            self.tool_bar_layout = QHBoxLayout()
+            self.tool_bar_layout.setContentsMargins(0, 0, 0, 0)
+            self.tool_bar_layout.setSpacing(4)
+            header_layout.addLayout(self.tool_bar_layout)
+
+            # 右上角清空按钮
+            if self._show_clear_button:
+                self.clear_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+                self.clear_btn.setFixedSize(28, 28)
+                self.clear_btn.setIconSize(QSize(12, 12))
+                self.clear_btn.setToolTip(self._clear_tooltip)
+                self.clear_btn.clicked.connect(self.clear_requested.emit)
+                header_layout.addWidget(self.clear_btn, 0, Qt.AlignmentFlag.AlignRight)
+            else:
+                self.clear_btn = None
+
+            self.main_layout.addLayout(header_layout)
+
+            body_layout = QHBoxLayout()
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(10)
+
+            # 中间区域：空状态提示 / 波形显示（切换）
+            self._center_host = QWidget(self)
+            self._center_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._center_host.setMinimumHeight(56)
 
             self.waveform = WaveformWidget(self._center_host)
-            self.waveform.setFixedHeight(40)
-            self._center_stack.addWidget(self.waveform)
+            self.waveform.setFixedHeight(56)
+            self.waveform.set_timestamps_enabled(True)
+            self.waveform.set_timestamp_area_height(16)
+            self.waveform.apply_monochrome(True)
 
-            self.main_layout.addWidget(self._center_host, 1)
-            
-            # 3. 播放按钮 (右侧)
+            self._center_stack = None
+            self._empty_hint = None
+            if self._compact_empty_hint == "upload":
+                # 仅参考音频区域需要导入提示
+                self._center_stack = QStackedLayout(self._center_host)
+                self._center_stack.setContentsMargins(0, 0, 0, 0)
+
+                self._empty_hint = _UploadHintWidget(self._center_host)
+                self._empty_hint.clicked.connect(self.upload_requested.emit)
+                self._center_stack.addWidget(self._empty_hint)
+                self._center_stack.addWidget(self.waveform)
+            else:
+                # 输出样本：不允许显示“导入音频”空态，始终展示波形占位（加载遮罩会覆盖）
+                host_layout = QVBoxLayout(self._center_host)
+                host_layout.setContentsMargins(0, 0, 0, 0)
+                host_layout.setSpacing(0)
+                host_layout.addWidget(self.waveform)
+
+            body_layout.addWidget(self._center_host, 1)
+
+            # 播放按钮：黑白简洁风格，交互由 qfluentwidgets 接管
             self.play_btn = TransparentToolButton(FluentIcon.PLAY_SOLID, self)
-            self.play_btn.setFixedSize(40, 40)
+            self.play_btn.setFixedSize(36, 36)
             self.play_btn.setIconSize(QSize(18, 18))
-            self.play_btn.setStyleSheet("""
-                TransparentToolButton {
-                    color: #ff6b00;
-                    background-color: #fff0e0;
-                    border-radius: 20px;
-                }
-                TransparentToolButton:hover {
-                    background-color: #ffe0b2;
-                }
-                TransparentToolButton:pressed {
-                    background-color: #ffcc80;
-                }
-            """)
             self.play_btn.clicked.connect(self._toggle_play)
-            self.main_layout.addWidget(self.play_btn)
+            body_layout.addWidget(self.play_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            self.main_layout.addLayout(body_layout)
             
             # 创建隐藏的占位对象，防止 AttributeError
             self.icon_label = QLabel(self)
@@ -269,6 +406,11 @@ class AudioPlayerWidget(CardWidget):
 
             # 初始为空状态：隐藏播放按钮 & 使用提示
             self._set_empty_state(True)
+            if self.clear_btn is not None:
+                try:
+                    self.clear_btn.hide()
+                except Exception:
+                    pass
             
         else:
             # 标准模式
@@ -301,6 +443,7 @@ class AudioPlayerWidget(CardWidget):
             
             # === 2. 波形显示 ===
             self.waveform = WaveformWidget(self)
+            self.waveform.set_timestamps_enabled(False)
             self.main_layout.addWidget(self.waveform)
             
             # === 3. 时间显示 ===
@@ -324,19 +467,6 @@ class AudioPlayerWidget(CardWidget):
             self.play_btn = TransparentToolButton(FluentIcon.PLAY_SOLID, self)
             self.play_btn.setFixedSize(56, 56)
             self.play_btn.setIconSize(QSize(26, 26))
-            self.play_btn.setStyleSheet("""
-                TransparentToolButton {
-                    color: #ff6b00;
-                    background-color: #fff0e0;
-                    border-radius: 28px;
-                }
-                TransparentToolButton:hover {
-                    background-color: #ffe0b2;
-                }
-                TransparentToolButton:pressed {
-                    background-color: #ffcc80;
-                }
-            """)
             self.play_btn.clicked.connect(self._toggle_play)
             
             controls_layout.addWidget(self.play_btn)
@@ -345,21 +475,35 @@ class AudioPlayerWidget(CardWidget):
             
             self.main_layout.addLayout(controls_layout)
 
+        # 生成遮罩层（默认隐藏）：三点加载动画 + 进度条
+        try:
+            self._loading_overlay = _LoadingOverlay(self)
+            self._loading_overlay.hide()
+            self._loading_overlay.raise_()
+        except Exception:
+            self._loading_overlay = None
+
     def _set_empty_state(self, empty: bool):
         """切换空状态（仅 compact_mode 需要）。"""
         if not getattr(self, "_compact_mode", False):
             return
         try:
             if empty:
-                if hasattr(self, "_center_stack"):
-                    self._center_stack.setCurrentWidget(self._empty_hint)
+                if getattr(self, "_compact_empty_hint", "upload") == "upload":
+                    if getattr(self, "_center_stack", None) is not None and getattr(self, "_empty_hint", None) is not None:
+                        self._center_stack.setCurrentWidget(self._empty_hint)
                 if hasattr(self, "play_btn"):
                     self.play_btn.hide()
+                if getattr(self, "clear_btn", None) is not None:
+                    self.clear_btn.hide()
             else:
-                if hasattr(self, "_center_stack"):
-                    self._center_stack.setCurrentWidget(self.waveform)
+                if getattr(self, "_compact_empty_hint", "upload") == "upload":
+                    if getattr(self, "_center_stack", None) is not None:
+                        self._center_stack.setCurrentWidget(self.waveform)
                 if hasattr(self, "play_btn"):
                     self.play_btn.show()
+                if getattr(self, "clear_btn", None) is not None:
+                    self.clear_btn.show()
         except Exception:
             pass
 
@@ -383,7 +527,17 @@ class AudioPlayerWidget(CardWidget):
                 self._set_empty_state(True)
             # 不要 disable 整个组件，否则无法点击上传
             try:
-                self.title_label.setText("音色参考音频")
+                self.title_label.setText(self._base_title_text)
+            except Exception:
+                pass
+            try:
+                self.waveform.set_progress(0)
+                self.waveform.set_duration_ms(0)
+                self.waveform.set_position_ms(0)
+            except Exception:
+                pass
+            try:
+                self.player.stop()
             except Exception:
                 pass
             return
@@ -396,8 +550,17 @@ class AudioPlayerWidget(CardWidget):
         if getattr(self, "_compact_mode", False):
             self._set_empty_state(False)
         
-        # 更新标题为文件名
-        self.title_label.setText(os.path.basename(path))
+        # 标题策略：参考音频需要显示文件名；输出样本可保持固定标题
+        if self._title_follows_filename:
+            try:
+                self.title_label.setText(os.path.basename(path))
+            except Exception:
+                pass
+        else:
+            try:
+                self.title_label.setText(self._base_title_text)
+            except Exception:
+                pass
 
         self.player.setSource(QUrl.fromLocalFile(path))
         self.setEnabled(True)
@@ -407,8 +570,64 @@ class AudioPlayerWidget(CardWidget):
         btn = TransparentToolButton(icon, self)
         btn.setToolTip(tooltip)
         btn.clicked.connect(callback)
-        self.tool_bar_layout.addWidget(btn)
+        if hasattr(self, "tool_bar_layout") and self.tool_bar_layout is not None:
+            self.tool_bar_layout.addWidget(btn)
+        try:
+            self._tool_buttons.append(btn)
+        except Exception:
+            pass
         return btn
+
+    def set_loading(self, loading: bool, progress: float = 0.0):
+        """切换生成中的遮罩态（用于输出样本预渲染）。"""
+        self._loading = bool(loading)
+        if self._loading_overlay is None:
+            return
+
+        if self._loading:
+            self._loading_overlay.set_progress(progress)
+            self._loading_overlay.show()
+            self._loading_overlay.raise_()
+            self._loading_overlay.start()
+
+            # 禁用交互控件（遮罩会拦截，但这里再保险）
+            try:
+                self.play_btn.setEnabled(False)
+            except Exception:
+                pass
+            if getattr(self, "clear_btn", None) is not None:
+                try:
+                    self.clear_btn.setEnabled(False)
+                except Exception:
+                    pass
+            for b in getattr(self, "_tool_buttons", []):
+                try:
+                    b.setEnabled(False)
+                except Exception:
+                    pass
+        else:
+            self._loading_overlay.stop()
+            self._loading_overlay.hide()
+            try:
+                self.play_btn.setEnabled(True)
+            except Exception:
+                pass
+            if getattr(self, "clear_btn", None) is not None:
+                try:
+                    self.clear_btn.setEnabled(True)
+                except Exception:
+                    pass
+            for b in getattr(self, "_tool_buttons", []):
+                try:
+                    b.setEnabled(True)
+                except Exception:
+                    pass
+
+    def set_loading_progress(self, progress: float):
+        """更新遮罩态进度（0-1）。"""
+        if self._loading_overlay is None:
+            return
+        self._loading_overlay.set_progress(progress)
 
     def _toggle_play(self):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -420,11 +639,19 @@ class AudioPlayerWidget(CardWidget):
         if self._duration > 0:
             progress = position / self._duration
             self.waveform.set_progress(progress)
+            try:
+                self.waveform.set_position_ms(position)
+            except Exception:
+                pass
             self.current_time_label.setText(self._format_time(position))
 
     def _on_duration_changed(self, duration):
         self._duration = duration
         self.total_time_label.setText(self._format_time(duration))
+        try:
+            self.waveform.set_duration_ms(duration)
+        except Exception:
+            pass
 
     def _on_state_changed(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
@@ -444,4 +671,131 @@ class AudioPlayerWidget(CardWidget):
         seconds = (ms // 1000) % 60
         minutes = (ms // 60000)
         return f"{minutes}:{seconds:02d}"
+
+
+class _ThreeDotsSpinner(QWidget):
+    """经典三圆点循环放缩加载动画。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._t = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(72, 22)
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        if self._timer.isActive():
+            self._timer.stop()
+
+    def _tick(self):
+        self._t += 0.06
+        if self._t > 1e6:
+            self._t = 0.0
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        cy = h // 2
+
+        base_r = 5
+        gap = 18
+        x0 = (w - 2 * gap) // 2
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0))
+
+        phases = [0.0, 0.33, 0.66]
+        for i, ph in enumerate(phases):
+            s = 0.70 + 0.55 * (0.5 + 0.5 * math.sin((self._t + ph) * 2 * math.pi))
+            r = int(base_r * s)
+            cx = x0 + i * gap
+            painter.drawEllipse(cx - r, cy - r, 2 * r, 2 * r)
+
+
+class _LoadingOverlay(QWidget):
+    """覆盖层：半透明遮罩 + 三点动画 + 进度条。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setStyleSheet("background: rgba(255, 255, 255, 210); border-radius: 8px;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.spinner = _ThreeDotsSpinner(self)
+        layout.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.progress = ProgressBar(self)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(6)
+        self.progress.setFixedWidth(160)
+        layout.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._resize_to_parent()
+
+    def _resize_to_parent(self):
+        p = self.parentWidget()
+        if p is None:
+            return
+        self.setGeometry(0, 0, p.width(), p.height())
+
+    def showEvent(self, event):
+        self._resize_to_parent()
+        return super().showEvent(event)
+
+    def resizeEvent(self, event):
+        self._resize_to_parent()
+        return super().resizeEvent(event)
+
+    def start(self):
+        self.spinner.start()
+
+    def stop(self):
+        self.spinner.stop()
+
+    def set_progress(self, progress: float):
+        v = int(max(0.0, min(1.0, float(progress))) * 100)
+        self.progress.setValue(v)
+
+
+class ReferenceAudioPlayerWidget(AudioPlayerWidget):
+    """参考音频播放器：紧凑 + 可导入空态 + 可清空。"""
+
+    def __init__(self, title="Voice Reference", parent=None):
+        super().__init__(
+            title,
+            parent,
+            compact_mode=True,
+            compact_empty_hint="upload",
+            show_clear_button=True,
+            clear_tooltip="移除参考音频",
+            title_follows_filename=True,
+        )
+
+
+class ResultAudioPlayerWidget(AudioPlayerWidget):
+    """生成结果播放器：紧凑 + 不显示导入空态 + 无清空按钮。"""
+
+    def __init__(self, title="样本", parent=None):
+        super().__init__(
+            title,
+            parent,
+            compact_mode=True,
+            compact_empty_hint="none",
+            show_clear_button=False,
+            title_follows_filename=False,
+        )
 

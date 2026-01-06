@@ -24,7 +24,7 @@ from Source.Utility.indextts_utility import IndexTTSUtility
 from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterManager, Character
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
-from Source.UI.Interface.AIVoiceInterface.audio_player_widget import AudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ReferenceAudioPlayerWidget, ResultAudioPlayerWidget
 from Source.UI.Basic.progress_bar_window import ProgressBarWindow
 
 
@@ -720,16 +720,49 @@ class AIVoiceInterface(QFrame):
     def _create_reference_audio_card(self, parent_layout: QVBoxLayout):
         """创建音色参考音频卡片"""
         # 使用新的 AudioPlayerWidget (开启紧凑模式)
-        self.ref_player_widget = AudioPlayerWidget("Voice Reference", self, compact_mode=True)
+        self.ref_player_widget = ReferenceAudioPlayerWidget("Voice Reference", self)
         # self.ref_player_widget.audio_dropped.connect(self._on_audio_dropped)
         try:
             self.ref_player_widget.upload_requested.connect(self._on_import_audio)
+        except Exception:
+            pass
+
+        try:
+            self.ref_player_widget.clear_requested.connect(self._on_clear_reference_audio)
         except Exception:
             pass
         
         # 移除“导入参考音频”加号按钮：上传交互由空状态提示/点击区域承担
         
         parent_layout.addWidget(self.ref_player_widget)
+
+    def _on_clear_reference_audio(self):
+        """清空当前角色的参考音频，并恢复空状态显示。"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="生成进行中，暂不可更换/移除参考音频",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
+        character = self._character_manager.selected_character
+        if not character:
+            try:
+                self.ref_player_widget.set_audio_path("")
+            except Exception:
+                pass
+            self._update_generate_btn_state()
+            return
+
+        try:
+            self._character_manager.update_reference_audio(character.id, "")
+        except Exception:
+            pass
+
+        self._update_reference_audio_display()
+        self._update_generate_btn_state()
 
     def _create_text_input_card(self, parent_layout: QHBoxLayout):
         """创建合成文本输入卡片"""
@@ -781,6 +814,29 @@ class AIVoiceInterface(QFrame):
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 16)
         container_layout.setSpacing(12)
+
+        # 标题栏：右上角历史记录按钮（占位）
+        header = QWidget(container)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 12, 16, 0)
+        header_layout.setSpacing(8)
+
+        header_title = BodyLabel("生成结果", header)
+        header_layout.addWidget(header_title)
+        header_layout.addStretch(1)
+
+        try:
+            history_icon = getattr(FluentIcon, "HISTORY")
+        except Exception:
+            history_icon = FluentIcon.DOCUMENT
+
+        self._history_btn = TransparentToolButton(history_icon, header)
+        self._history_btn.setToolTip("历史记录（暂未实现）")
+        self._history_btn.setEnabled(False)
+        self._history_btn.setFixedSize(32, 32)
+        header_layout.addWidget(self._history_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        container_layout.addWidget(header)
         
         # 上半部分：播放器 (AudioPlayerWidget 也是 CardWidget，这里嵌套使用或调整)
         # 为了保持样式一致，我们直接使用 AudioPlayerWidget 作为上半部分，
@@ -805,41 +861,30 @@ class AIVoiceInterface(QFrame):
         self._output_empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self._output_empty_icon)
 
-        self.output_player_widget = AudioPlayerWidget("Synthesis Result", self._output_stack_host)
-        # 移除 AudioPlayerWidget 的边框和阴影，使其融入
-        self.output_player_widget.setStyleSheet("CardWidget { border: none; background: transparent; }")
-        # 添加下载按钮
-        self.output_player_widget.add_tool_button(
-            FluentIcon.DOWNLOAD, "保存音频", self._on_download_audio
-        )
+        # 非空态：展示 3 个候选样本播放器
+        outputs_view = QWidget(self._output_stack_host)
+        outputs_layout = QVBoxLayout(outputs_view)
+        outputs_layout.setContentsMargins(16, 0, 16, 0)
+        outputs_layout.setSpacing(8)
+
+        self._output_wav_paths = ["", "", ""]
+        self.output_player_widgets = []
+
+        for i in range(3):
+            w = ResultAudioPlayerWidget(f"样本 {i + 1}", outputs_view)
+            w.add_tool_button(
+                FluentIcon.DOWNLOAD,
+                "保存音频",
+                (lambda _=False, idx=i: self._on_download_audio(self._output_wav_paths[idx])),
+            )
+            outputs_layout.addWidget(w)
+            self.output_player_widgets.append(w)
 
         self._output_stack.addWidget(empty_view)
-        self._output_stack.addWidget(self.output_player_widget)
+        self._output_stack.addWidget(outputs_view)
         self._output_stack.setCurrentIndex(0)  # 默认空状态
 
         container_layout.addWidget(self._output_stack_host)
-        
-        # 下半部分：控制区
-        control_area = QWidget(container)
-        control_layout = QVBoxLayout(control_area)
-        control_layout.setContentsMargins(16, 0, 16, 0)
-        control_layout.setSpacing(12)
-        
-        # 进度条
-        self.generate_progress = ProgressBar(control_area)
-        self.generate_progress.setRange(0, 100)
-        self.generate_progress.setValue(0)
-        self.generate_progress.setFixedHeight(6)
-        self.generate_progress.setVisible(False)
-        control_layout.addWidget(self.generate_progress)
-
-        # 状态标签
-        self.output_status_label = BodyLabel("等待生成", control_area)
-        self.output_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.output_status_label.setStyleSheet("color: gray;")
-        control_layout.addWidget(self.output_status_label)
-        
-        container_layout.addWidget(control_area)
         container_layout.addStretch()
         
         parent_layout.addWidget(container, 1)
@@ -951,6 +996,14 @@ class AIVoiceInterface(QFrame):
         # IndexTTSJob 信号
         self._main_window.indextts_job.progress_updated.connect(self._on_progress_updated)
         self._main_window.indextts_job.job_completed.connect(self._on_job_completed)
+        try:
+            self._main_window.indextts_job.variant_generated.connect(self._on_variant_generated)
+        except Exception:
+            pass
+        try:
+            self._main_window.indextts_job.variant_progress.connect(self._on_variant_progress)
+        except Exception:
+            pass
         
         # IndexTTSDownloadJob 信号
         self._main_window.indextts_download_job.job_completed.connect(self._on_download_job_completed)
@@ -1082,6 +1135,15 @@ class AIVoiceInterface(QFrame):
 
     def _on_download_clicked(self):
         """下载或删除依赖和模型"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="生成进行中，暂不可执行该操作",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
         audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
         save_dir = os.path.join(audiobox_root, "checkpoints")
@@ -1483,6 +1545,15 @@ class AIVoiceInterface(QFrame):
 
     def _on_load_model_clicked(self):
         """加载/卸载模型"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="生成进行中，暂不可加载/卸载模型",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
         job = self._main_window.indextts_job
         
         if job.is_model_loaded:
@@ -1750,6 +1821,15 @@ class AIVoiceInterface(QFrame):
 
     def _on_import_audio(self):
         """导入参考音频"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="生成进行中，暂不可导入参考音频",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
         character = self._character_manager.selected_character
         if not character:
             InfoBar.warning(
@@ -1771,6 +1851,15 @@ class AIVoiceInterface(QFrame):
 
     def _on_audio_dropped(self, file_path: str):
         """处理拖拽导入的音频"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="生成进行中，暂不可导入参考音频",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
         character = self._character_manager.selected_character
         if not character:
             InfoBar.warning(
@@ -1817,54 +1906,51 @@ class AIVoiceInterface(QFrame):
         """播放生成的音频 (已由 AudioPlayerWidget 接管)"""
         pass
 
-    def _on_download_audio(self):
-        """下载/保存生成的音频"""
-        wav_path = self._main_window.indextts_job.last_wav_path
+    def _on_download_audio(self, wav_path: Optional[str] = None):
+        """下载/保存生成的音频（支持指定某个样本路径）。"""
+        if wav_path is None:
+            wav_path = self._main_window.indextts_job.last_wav_path
         if not wav_path or not os.path.exists(wav_path):
             InfoBar.warning(
                 title="无可保存文件",
                 content="请先生成音频",
                 parent=self,
                 position=InfoBarPosition.TOP,
-                duration=3000
+                duration=3000,
             )
             return
 
         character = self._character_manager.selected_character
-        
-        # 获取建议路径
         if character:
             suggested_dir, suggested_name = self._character_manager.get_suggested_output_path(character.id)
         else:
             suggested_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MusicLocation)
             suggested_name = f"output_{int(time.time())}.wav"
 
-        # 打开保存对话框
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "保存音频文件",
+            self,
+            "保存音频文件",
             os.path.join(suggested_dir, suggested_name),
-            "WAV 音频 (*.wav);;所有文件 (*.*)"
+            "WAV 音频 (*.wav);;所有文件 (*.*)",
         )
 
         if save_path:
             try:
                 import shutil
+
                 shutil.copy2(wav_path, save_path)
-                
-                # 记住保存位置
                 if character:
                     self._character_manager.update_last_output(
                         character.id,
                         os.path.dirname(save_path),
-                        os.path.basename(save_path)
+                        os.path.basename(save_path),
                     )
-                
                 InfoBar.success(
                     title="保存成功",
                     content=os.path.basename(save_path),
                     parent=self,
                     position=InfoBarPosition.TOP,
-                    duration=3000
+                    duration=3000,
                 )
             except Exception as e:
                 InfoBar.error(
@@ -1872,13 +1958,22 @@ class AIVoiceInterface(QFrame):
                     content=str(e),
                     parent=self,
                     position=InfoBarPosition.TOP,
-                    duration=3000
+                    duration=3000,
                 )
 
     # ==================== 语音合成 ====================
 
     def _on_generate_clicked(self):
         """生成语音"""
+        if getattr(self, "_synthesis_in_progress", False):
+            InfoBar.info(
+                title="正在生成",
+                content="请等待当前生成完成",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
         # 检查环境是否就绪
         if not self._check_env_ready_with_warning():
             return
@@ -1937,27 +2032,41 @@ class AIVoiceInterface(QFrame):
                 for label in IndexTTSUtility.EMO_LABELS
             ]
 
-        # 临时输出路径
+        # 临时输出路径（一次生成 3 个候选样本）
         temp_dir = os.path.join(os.getcwd(), "temp_output")
         os.makedirs(temp_dir, exist_ok=True)
-        output_path = os.path.join(temp_dir, f"temp_{int(time.time())}.wav")
+        ts = int(time.time())
+        output_paths = [
+            os.path.join(temp_dir, f"temp_{ts}_v{i + 1}.wav")
+            for i in range(3)
+        ]
+
+        # 清空旧输出 UI，并预渲染 3 个样本为“生成中”遮罩态
+        try:
+            self._output_wav_paths = ["", "", ""]
+            for w in getattr(self, "output_player_widgets", []):
+                w.set_audio_path("")
+                try:
+                    w.set_loading(True, 0.0)
+                except Exception:
+                    pass
+            # 点击生成后立刻展示 3 个预渲染播放器（避免出现“空态音符 + 底部进度/文本”）
+            self._set_output_empty_state(False)
+        except Exception:
+            pass
 
         # 开始生成
         self._synthesis_in_progress = True
-        self._main_window.indextts_job.synthesize_action(
+        self._main_window.indextts_job.synthesize_variants_action(
             spk_audio_path=character.reference_audio_path,
             text=text,
-            output_path=output_path,
+            output_paths=output_paths,
             emo_mode=emo_mode,
             emo_vector=emo_vector,
         )
 
         # 更新 UI 状态
         self.generate_btn.setEnabled(False)
-        self.generate_progress.setVisible(True)
-        self.generate_progress.setValue(0)
-        self.output_status_label.setText("正在生成...")
-        self.output_status_label.setStyleSheet("color: #0078d4;")
 
     def _on_emo_mode_changed(self):
         """情感模式切换"""
@@ -1988,17 +2097,40 @@ class AIVoiceInterface(QFrame):
     @Slot(float, str)
     def _on_progress_updated(self, progress: float, text: str):
         """进度更新回调"""
-        percent = int(progress * 100)
-        self.generate_progress.setValue(percent)
-        if text:
-            self.output_status_label.setText(text)
+        # 生成结果区域不再展示“总进度条/底部状态文本”（仅使用每个样本卡片的遮罩进度）
+        return
+
+    @Slot(int, str)
+    def _on_variant_generated(self, index: int, wav_path: str):
+        """某个候选样本生成完成回调。"""
+        try:
+            if 0 <= int(index) < 3:
+                self._output_wav_paths[int(index)] = wav_path
+                if hasattr(self, "output_player_widgets") and int(index) < len(self.output_player_widgets):
+                    self.output_player_widgets[int(index)].set_audio_path(wav_path)
+                    try:
+                        self.output_player_widgets[int(index)].set_loading(False)
+                    except Exception:
+                        pass
+                self._set_output_empty_state(False)
+        except Exception:
+            pass
+
+    @Slot(int, float, str)
+    def _on_variant_progress(self, index: int, progress: float, text: str):
+        """单个样本实时进度：更新对应播放器遮罩进度条。"""
+        try:
+            idx = int(index)
+            if hasattr(self, "output_player_widgets") and 0 <= idx < len(self.output_player_widgets):
+                self.output_player_widgets[idx].set_loading_progress(float(progress))
+        except Exception:
+            pass
 
     @Slot(bool)
     def _on_job_completed(self, success: bool):
         """任务完成回调"""
         self._update_model_status()
         self._update_generate_btn_state()
-        self.generate_progress.setVisible(False)
 
         # job_completed(True) 同时用于“模型加载完成”和“语音生成完成”。
         # 只有当我们确实处于“合成中”时，才更新生成结果状态文本。
@@ -2006,20 +2138,39 @@ class AIVoiceInterface(QFrame):
             return
 
         self._synthesis_in_progress = False
+
+        # 结束后，确保所有遮罩都退出
+        try:
+            for w in getattr(self, "output_player_widgets", []):
+                w.set_loading(False)
+        except Exception:
+            pass
         
         if success:
-            wav_path = self._main_window.indextts_job.last_wav_path
-            if wav_path and os.path.exists(wav_path):
-                self.output_player_widget.set_audio_path(wav_path)
+            any_ok = False
+            try:
+                any_ok = any(p and os.path.exists(p) for p in getattr(self, "_output_wav_paths", []))
+            except Exception:
+                any_ok = False
+            if any_ok:
                 self._set_output_empty_state(False)
-                self.output_status_label.setText("生成成功")
-                self.output_status_label.setStyleSheet("color: green;")
             else:
-                self.output_status_label.setText("生成失败: 文件未找到")
-                self.output_status_label.setStyleSheet("color: red;")
+                # 没有任何样本产出：回到空态音符
+                try:
+                    self._output_wav_paths = ["", "", ""]
+                    for w in getattr(self, "output_player_widgets", []):
+                        w.set_audio_path("")
+                except Exception:
+                    pass
+                self._set_output_empty_state(True)
         else:
-            self.output_status_label.setText("生成失败")
-            self.output_status_label.setStyleSheet("color: red;")
+            try:
+                self._output_wav_paths = ["", "", ""]
+                for w in getattr(self, "output_player_widgets", []):
+                    w.set_audio_path("")
+            except Exception:
+                pass
+            self._set_output_empty_state(True)
 
     @Slot(bool)
     def _on_download_job_completed(self, success: bool):
@@ -2067,14 +2218,18 @@ class AIVoiceInterface(QFrame):
         self._check_env_and_model()
         self._update_generate_btn_state()
 
-        # 更新播放器状态
-        wav_path = self._main_window.indextts_job.last_wav_path
-        if wav_path and os.path.exists(wav_path):
-            self.output_player_widget.set_audio_path(wav_path)
-            self._set_output_empty_state(False)
-        else:
-            self.output_player_widget.set_audio_path("")
-            self._set_output_empty_state(True)
+        # 更新播放器状态：默认回到空态（不做历史回填）
+        try:
+            self._output_wav_paths = ["", "", ""]
+            for w in getattr(self, "output_player_widgets", []):
+                w.set_audio_path("")
+                try:
+                    w.set_loading(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._set_output_empty_state(True)
 
     def on_job_finished(self, success: bool):
         """Job 完成回调（由 MainWindow 调用）"""

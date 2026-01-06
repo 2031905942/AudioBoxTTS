@@ -10,11 +10,12 @@
 
 import json
 import os
+import random
 import subprocess
 import sys
 import threading
 import time
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from PySide6.QtCore import QObject, Signal, Slot, QMutex, QMutexLocker
 
@@ -34,6 +35,9 @@ class IndexTTSUtility(QObject):
     update_progress_signal = Signal(float, str)
     error_signal = Signal(str)
     generated_signal = Signal(str, int)
+    variant_generated_signal = Signal(int, str, int)  # index, wav_path, sample_rate
+    variant_progress_signal = Signal(int, float, str)  # index, progress(0-1), desc
+    variants_done_signal = Signal(list, int)          # wav_paths, sample_rate
     model_loaded_signal = Signal()
 
     # 情感控制模式常量
@@ -230,6 +234,99 @@ class IndexTTSUtility(QObject):
 
             self.error_signal.emit(f"推理失败: {e}\n{traceback.format_exc()}")
 
+    @Slot(str, str, list, int, list, float)
+    def synthesize_variants(self, spk_audio_path: str, text: str, output_paths: List[str],
+                            emo_mode: int = 0, emo_vector: Optional[List[float]] = None,
+                            emo_weight: float = 1.0):
+        """一次生成多个候选样本（在工作线程调用，串行生成更稳）。"""
+        if not self.is_model_loaded:
+            self.error_signal.emit("模型未加载")
+            return
+
+        if not text or not text.strip():
+            self.error_signal.emit("文本不能为空")
+            return
+
+        if not os.path.exists(spk_audio_path):
+            self.error_signal.emit(f"参考音频不存在: {spk_audio_path}")
+            return
+
+        if not output_paths or not isinstance(output_paths, list):
+            self.error_signal.emit("输出路径无效")
+            return
+
+        cleaned = [str(p) for p in output_paths if p]
+        if not cleaned:
+            self.error_signal.emit("输出路径无效")
+            return
+
+        rng = random.Random(time.time())
+        out_ok: List[str] = []
+        last_sr = 22050
+
+        def _rand_kwargs() -> Dict[str, Any]:
+            temperature = float(max(0.05, min(1.5, 0.70 + rng.uniform(-0.08, 0.08))))
+            top_p = float(max(0.05, min(0.99, 0.90 + rng.uniform(-0.05, 0.03))))
+            top_k = int(max(0, min(200, int(round(40 + rng.uniform(-20, 20))))))
+            repetition_penalty = float(max(0.8, min(1.4, 1.05 + rng.uniform(-0.05, 0.08))))
+
+            return {
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "num_beams": 1,
+                "repetition_penalty": repetition_penalty,
+                "length_penalty": 1.0,
+            }
+
+        try:
+            total = max(1, len(cleaned))
+
+            for idx, out_path in enumerate(cleaned):
+                self.update_progress_signal.emit(float(idx / total), f"正在生成样本 {idx + 1}/{total}...")
+
+                gen_kwargs = _rand_kwargs()
+
+                self._send_cmd(
+                    "synthesize",
+                    {
+                        "spk_audio_prompt": spk_audio_path,
+                        "text": text.strip(),
+                        "output_path": out_path,
+                        "emo_mode": int(emo_mode),
+                        "emo_vector": emo_vector if emo_vector else [0.0] * 8,
+                        "emo_alpha": float(emo_weight),
+                        # 高级参数（由子进程决定是否支持/使用）
+                        "generation_kwargs": gen_kwargs,
+                        "max_text_tokens_per_segment": 150,
+                    },
+                )
+
+                def _progress_cb(v: float, desc: str):
+                    vv = max(0.0, min(1.0, float(v)))
+                    self.variant_progress_signal.emit(int(idx), vv, desc or "")
+                    overall = (idx + vv) / total
+                    self.update_progress_signal.emit(float(overall), desc or "")
+
+                resp = self._wait_for_result({"synthesized"}, timeout=600, progress_cb=_progress_cb)
+                actual_out = resp.get("output_path") or out_path
+                last_sr = int(resp.get("sample_rate") or 22050)
+
+                if os.path.exists(actual_out):
+                    out_ok.append(actual_out)
+                    self.variant_generated_signal.emit(int(idx), str(actual_out), int(last_sr))
+                else:
+                    raise RuntimeError("推理完成但未生成文件")
+
+            self.update_progress_signal.emit(1.0, "生成完成")
+            self.variants_done_signal.emit(out_ok, int(last_sr))
+
+        except Exception as e:
+            import traceback
+
+            self.error_signal.emit(f"推理失败: {e}\n{traceback.format_exc()}")
+
     def unload_model(self):
         """卸载模型，释放显存"""
         with QMutexLocker(self._mutex):
@@ -315,7 +412,7 @@ class IndexTTSUtility(QObject):
         self._engine_proc.stdin.write(json.dumps({"cmd": cmd, "payload": payload}, ensure_ascii=False) + "\n")
         self._engine_proc.stdin.flush()
 
-    def _wait_for_result(self, ok_types: set[str], timeout: float) -> dict:
+    def _wait_for_result(self, ok_types: set[str], timeout: float, progress_cb=None) -> dict:
         assert self._engine_proc is not None
         assert self._engine_proc.stdout is not None
 
@@ -347,8 +444,15 @@ class IndexTTSUtility(QObject):
                 except Exception:
                     v = 0.0
                 desc = msg.get("desc") or ""
-                mapped = 0.1 + max(0.0, min(1.0, v)) * 0.8
-                self.update_progress_signal.emit(mapped, desc)
+
+                if callable(progress_cb):
+                    try:
+                        progress_cb(v, desc)
+                    except Exception:
+                        pass
+                else:
+                    mapped = 0.1 + max(0.0, min(1.0, v)) * 0.8
+                    self.update_progress_signal.emit(mapped, desc)
                 continue
 
             if msg_type == "error":
