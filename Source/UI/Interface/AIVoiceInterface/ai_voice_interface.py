@@ -175,7 +175,9 @@ class DownloadModelChoiceDialog(MessageBoxBase):
         content = BodyLabel(
             "环境依赖检测通过。\n\n"
             f"即将下载模型文件到:\n{AIVoiceInterface._wrap_path_for_label(save_dir)}\n\n"
-            "文件大小约 5GB，请选择下载方式：",
+            "文件大小约 7GB，下载过程可以去做其他事情~请选择下载方式：\n"
+            "若在公司网络环境，则具备外网环境，两种下载方式均可使用；\n"
+            "若在家用网络环境，推荐使用“镜像下载”方式，速度更快更稳定。",
             self,
         )
         content.setWordWrap(True)
@@ -197,8 +199,8 @@ class DownloadModelChoiceDialog(MessageBoxBase):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
 
-        mirror_btn = PrimaryPushButton(FluentIcon.DOWNLOAD, "镜像下载 (推荐)", btn_grid_host)
-        direct_btn = PushButton(FluentIcon.DOWNLOAD, "直连下载", btn_grid_host)
+        mirror_btn = PrimaryPushButton(FluentIcon.DOWNLOAD, "国内镜像下载", btn_grid_host)
+        direct_btn = PrimaryPushButton(FluentIcon.DOWNLOAD, "直连下载(公司网络可用)", btn_grid_host)
         delete_env_btn = PushButton(FluentIcon.DELETE, "删除环境依赖", btn_grid_host)
         cancel_btn = PushButton("取消", btn_grid_host)
 
@@ -232,6 +234,79 @@ class DownloadModelChoiceDialog(MessageBoxBase):
         cancel_btn.clicked.connect(lambda: _pick("cancel", False))
 
         # 控制弹窗宽度，避免路径/文本挤压按钮
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = min(820, int(avail.width() * 0.82))
+            else:
+                w = 780
+            self.widget.setMinimumWidth(max(620, w))
+        except Exception:
+            self.widget.setMinimumWidth(720)
+
+
+class EnvMissingInstallDialog(MessageBoxBase):
+    """环境缺失弹窗（两按钮网格布局，避免 MessageBox 按钮重叠）。"""
+
+    def __init__(self, parent, details: str):
+        super().__init__(parent)
+        self.choice: str | None = None  # install/cancel
+
+        title = BodyLabel("环境缺失", self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(
+            "检测到运行所需的 Python 依赖未下载。\n"
+            f"({details})\n\n"
+            "是否立即下载依赖？下载过程可以去做其他事情~",
+            self,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 清空默认按钮布局里的两个按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_grid_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        install_btn = PrimaryPushButton(FluentIcon.DOWNLOAD, "下载依赖", btn_grid_host)
+        cancel_btn = PushButton("取消", btn_grid_host)
+
+        for b in (install_btn, cancel_btn):
+            b.setMinimumWidth(180)
+            b.setMinimumHeight(34)
+
+        grid.addWidget(install_btn, 0, 0)
+        grid.addWidget(cancel_btn, 0, 1)
+
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 24)
+        except Exception:
+            pass
+
+        self.buttonLayout.addWidget(btn_grid_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        def _pick(v: str, accept: bool):
+            self.choice = v
+            if accept:
+                self.accept()
+            else:
+                self.reject()
+
+        install_btn.clicked.connect(lambda: _pick("install", True))
+        cancel_btn.clicked.connect(lambda: _pick("cancel", False))
+
         try:
             screen = QGuiApplication.primaryScreen()
             if screen is not None:
@@ -292,16 +367,30 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
         super().__init__(parent)
         self.choice: str | None = None
 
-        title = BodyLabel("删除依赖和/或模型", self)
-        self.viewLayout.addWidget(title)
+        action = str(env_action).lower()
 
-        content = BodyLabel(
+        title_text = "删除依赖和/或模型"
+        content_text = (
             "请选择要删除的内容：\n\n"
             f"模型目录: {AIVoiceInterface._wrap_path_for_label(save_dir)}\n"
             "独立环境: Runtime/IndexTTS2/.venv\n\n"
-            "删除模型文件后，需重新下载才能使用语音合成功能；\n",
-            self,
+            "删除模型文件后，需重新下载才能使用语音合成功能；\n"
         )
+
+        if action == "download":
+            title_text = "依赖缺失"
+            content_text = (
+                "检测到模型文件已完整，但运行所需的 IndexTTS2 独立环境依赖缺失。\n\n"
+                "推荐：点击“下载环境依赖”进行安装（不会影响已下载的模型文件）。\n\n"
+                f"模型目录: {AIVoiceInterface._wrap_path_for_label(save_dir)}\n"
+                "独立环境: Runtime/IndexTTS2/.venv\n\n"
+                "如确实不再使用，也可以选择删除模型文件以释放磁盘空间。"
+            )
+
+        title = BodyLabel(title_text, self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(content_text, self)
         content.setWordWrap(True)
         self.viewLayout.addWidget(content)
 
@@ -320,7 +409,8 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
 
-        delete_model_btn = PrimaryPushButton(FluentIcon.DELETE, "删除模型文件", btn_grid_host)
+        # 视觉引导：尽量不要删除 -> 删除按钮用白色，取消按钮用蓝色
+        delete_model_btn: QWidget
 
         env_btn_icon = FluentIcon.DELETE
         env_btn_text = "删除环境依赖"
@@ -330,8 +420,15 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
             env_btn_text = "下载环境依赖"
             env_choice_value = "download_env"
 
-        delete_env_btn = PushButton(env_btn_icon, env_btn_text, btn_grid_host)
-        cancel_btn = PushButton("取消", btn_grid_host)
+        if action == "delete":
+            delete_model_btn = PushButton(FluentIcon.DELETE, "删除模型文件", btn_grid_host)
+            delete_env_btn = PushButton(env_btn_icon, env_btn_text, btn_grid_host)
+            cancel_btn = PrimaryPushButton("取消", btn_grid_host)
+        else:
+            # 下载依赖场景：保持“下载”为主动作（蓝色）
+            delete_model_btn = PushButton(FluentIcon.DELETE, "删除模型文件", btn_grid_host)
+            delete_env_btn = PrimaryPushButton(env_btn_icon, env_btn_text, btn_grid_host)
+            cancel_btn = PushButton("取消", btn_grid_host)
 
         for b in (delete_model_btn, delete_env_btn, cancel_btn):
             b.setMinimumWidth(180)
@@ -892,10 +989,69 @@ class AIVoiceInterface(QFrame):
     def _set_output_empty_state(self, empty: bool):
         """切换生成结果区域空状态（未生成时仅显示音符图标）。"""
         try:
+            cur = -1
+            try:
+                cur = int(self._output_stack.currentIndex())
+            except Exception:
+                cur = -1
+
             if empty:
+                if cur == 0:
+                    return
                 self._output_stack.setCurrentIndex(0)
-            else:
-                self._output_stack.setCurrentIndex(1)
+                return
+
+            # non-empty
+            if cur == 1:
+                return
+            self._output_stack.setCurrentIndex(1)
+            # 非空态会显著增加内容高度：主动让主窗口增高，避免控件被挤压造成“视觉重叠”
+            self._grow_window_to_fit_contents()
+        except Exception:
+            pass
+
+    def _grow_window_to_fit_contents(self):
+        """当内容区展开时，让主窗口向外增高以容纳内容。
+
+        Qt 默认不会因为子控件 show/hide 自动调整顶层窗口尺寸；
+        这里在关键交互点触发一次增高，避免布局被压缩导致控件观感重叠。
+        """
+        try:
+            win = getattr(self, "_main_window", None) or self.window()
+            if win is None:
+                return
+
+            # 触发布局重算
+            try:
+                if self.layout() is not None:
+                    self.layout().activate()
+            except Exception:
+                pass
+
+            # 缓存一次“窗口额外高度”（标题栏/导航栏等），避免随着 resize 反复漂移导致越长越高
+            if not hasattr(self, "_window_extra_h_cache"):
+                try:
+                    extra0 = int(win.height()) - int(self.height())
+                    self._window_extra_h_cache = max(0, min(600, extra0))
+                except Exception:
+                    self._window_extra_h_cache = 0
+
+            hint_h = 0
+            try:
+                hint_h = max(int(self.sizeHint().height()), int(self.minimumSizeHint().height()))
+            except Exception:
+                hint_h = int(self.height())
+
+            # 估算非 client 区与外围控件占用的高度差
+            extra_h = 0
+            try:
+                extra_h = int(getattr(self, "_window_extra_h_cache", 0) or 0)
+            except Exception:
+                extra_h = 0
+
+            desired_h = int(hint_h + extra_h + 16)
+            if desired_h > int(win.height()):
+                win.resize(int(win.width()), desired_h)
         except Exception:
             pass
 
@@ -1275,17 +1431,10 @@ class AIVoiceInterface(QFrame):
         self._check_env_and_model()
         
         if not is_ready:
-            # 提示安装环境
-            msg_box = MessageBox(
-                "环境缺失",
-                f"检测到运行所需的 Python 依赖未安装。\n({msg})\n\n是否立即安装依赖并下载模型？",
-                self._main_window
-            )
-            msg_box.yesButton.setText("安装并下载")
-            msg_box.cancelButton.setText("取消")
-            self._tune_message_box(msg_box)
-            
-            if msg_box.exec():
+            # 提示安装环境（自定义布局，保证按钮不重叠；样式与“下载模型”窗口一致）
+            dialog = EnvMissingInstallDialog(self._main_window, msg)
+            res = dialog.exec()
+            if res and dialog.choice == "install":
                 self._pending_save_dir = save_dir
                 
                 # 连接信号，等待环境安装完成
@@ -1430,9 +1579,9 @@ class AIVoiceInterface(QFrame):
             if os.path.exists(file_path):
                 files_to_delete.append(file_path)
         
-        # 添加要删除的文件夹 (如 qwen 模型文件夹和 hf_cache)
+        # 添加要删除的文件夹（模型下载产生的目录）
         dirs_to_delete = []
-        for dir_name in ["qwen0.6bemo4-merge", "hf_cache"]:
+        for dir_name in ["qwen0.6bemo4-merge", "hf_cache", "amphion", "facebook"]:
             dir_path = os.path.join(save_dir, dir_name)
             if os.path.exists(dir_path):
                 dirs_to_delete.append(dir_path)
@@ -1515,11 +1664,12 @@ class AIVoiceInterface(QFrame):
         if env_ok and model_ok:
             self._is_delete_mode = True
             self.download_btn.setText("配置完成，点击可删除")
-            self.download_btn.setIcon(FluentIcon.DELETE)
+            # 视觉保持与“加载完成，点击可卸载”一致：浅蓝 + 对勾
+            self.download_btn.setIcon(FluentIcon.ACCEPT)
             self.download_btn.setToolTip("删除 IndexTTS2 的依赖和模型文件以释放磁盘空间")
             if hasattr(self, "_model_btn_icon_size"):
                 self.download_btn.setIconSize(self._model_btn_icon_size)
-            self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_delete", ""))
+            self.download_btn.setStyleSheet(getattr(self, "_load_btn_style_unload", ""))
             return
 
         # 2) 仅环境缺失：保持黄色样式，但引导下载环境依赖
@@ -2071,6 +2221,9 @@ class AIVoiceInterface(QFrame):
     def _on_emo_mode_changed(self):
         """情感模式切换"""
         self.vector_panel.setVisible(self.emo_mode_vector.isChecked())
+        # 展开情感向量面板时，让窗口向外增高而不是压缩上方组件
+        if self.emo_mode_vector.isChecked():
+            self._grow_window_to_fit_contents()
 
     def _update_generate_btn_state(self):
         """更新生成按钮状态"""
