@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     CardWidget, FluentIcon, TransparentToolButton, 
-    BodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition, ProgressBar
+    BodyLabel, CaptionLabel, ToolTipFilter, ToolTipPosition, ProgressBar, IconWidget
 )
 
 
@@ -31,11 +31,14 @@ class _UploadHintWidget(QFrame):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self._icon = QLabel(self)
-        pm = self._make_upload_tray_pixmap(20)
-        self._icon.setPixmap(pm)
+        # 使用 FluentIcon 替代手绘图标，保持风格一致
+        self._icon = IconWidget(self)
+        try:
+            # 当前版本 FluentIcon 没有 UPLOAD/CLOUD_UPLOAD，使用接近的 UP
+            self._icon.setIcon(FluentIcon.UP)
+        except Exception:
+            pass
         self._icon.setFixedSize(24, 24)
-        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._icon, 0)
 
         self._text = QLabel("将音频拖入任意位置  -或-  点击上传", self)
@@ -45,40 +48,6 @@ class _UploadHintWidget(QFrame):
         self._text.setFont(f)
         self._text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._text, 0)
-
-    def _make_upload_tray_pixmap(self, size: int) -> QPixmap:
-        """绘制托盘样式上传图标（上箭头 + U 型托盘），避免依赖特定 FluentIcon 枚举。"""
-        s = int(size)
-        pm = QPixmap(s, s)
-        pm.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        c = self.palette().color(self.foregroundRole())
-        pen = QPen(c, max(2, s // 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-
-        # 箭头
-        cx = s * 0.5
-        top = s * 0.18
-        mid = s * 0.55
-        painter.drawLine(QPoint(int(cx), int(mid)), QPoint(int(cx), int(top)))
-        painter.drawLine(QPoint(int(cx), int(top)), QPoint(int(cx - s * 0.18), int(top + s * 0.18)))
-        painter.drawLine(QPoint(int(cx), int(top)), QPoint(int(cx + s * 0.18), int(top + s * 0.18)))
-
-        # 托盘（U 型）
-        left = s * 0.22
-        right = s * 0.78
-        tray_top = s * 0.62
-        tray_bottom = s * 0.82
-        painter.drawLine(QPoint(int(left), int(tray_top)), QPoint(int(left), int(tray_bottom)))
-        painter.drawLine(QPoint(int(right), int(tray_top)), QPoint(int(right), int(tray_bottom)))
-        painter.drawLine(QPoint(int(left), int(tray_bottom)), QPoint(int(right), int(tray_bottom)))
-
-        painter.end()
-        return pm
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

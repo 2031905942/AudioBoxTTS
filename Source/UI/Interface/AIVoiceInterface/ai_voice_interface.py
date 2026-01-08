@@ -34,6 +34,8 @@ from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterMana
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ReferenceAudioPlayerWidget, ResultAudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.history_window import AIVoiceHistoryWindow
+from Source.Utility.tts_history_utility import tts_history_store
 from Source.UI.Basic.progress_bar_window import ProgressBarWindow
 
 
@@ -968,6 +970,10 @@ class AIVoiceInterface(QFrame):
         self._quick_guide_step_index = 0
         self._welcome_shown_runtime = False
 
+        # 历史记录窗口（非模态）
+        self._history_window = None
+        self._history_pending = None
+
     @staticmethod
     def _wrap_path_for_label(path: str) -> str:
         """给路径插入零宽断点，避免对话框因长路径被撑宽。"""
@@ -1379,10 +1385,14 @@ class AIVoiceInterface(QFrame):
             history_icon = FluentIcon.DOCUMENT
 
         self._history_btn = TransparentToolButton(history_icon, header)
-        self._history_btn.setToolTip("历史记录（暂未实现）")
-        self._history_btn.setEnabled(False)
+        self._history_btn.setToolTip("历史记录")
+        self._history_btn.setEnabled(True)
         self._history_btn.setFixedSize(32, 32)
         header_layout.addWidget(self._history_btn, 0, Qt.AlignmentFlag.AlignRight)
+        try:
+            self._history_btn.clicked.connect(self._on_open_history)
+        except Exception:
+            pass
 
         container_layout.addWidget(header)
         
@@ -1657,6 +1667,11 @@ class AIVoiceInterface(QFrame):
         self._update_reference_audio_display()
         # 更新生成按钮状态
         self._update_generate_btn_state()
+        # 刷新历史窗口（若已打开）
+        try:
+            self._refresh_history_window_if_open()
+        except Exception:
+            pass
 
     def _on_character_edit(self, character_id: str):
         """编辑角色"""
@@ -1720,6 +1735,61 @@ class AIVoiceInterface(QFrame):
         
         # 更新生成按钮状态
         self._update_generate_btn_state()
+
+        # 刷新历史窗口（若已打开）
+        try:
+            self._refresh_history_window_if_open()
+        except Exception:
+            pass
+
+    def _refresh_history_window_if_open(self):
+        win = getattr(self, "_history_window", None)
+        if win is None:
+            return
+        try:
+            if not win.isVisible():
+                return
+        except Exception:
+            pass
+        character = self._character_manager.selected_character
+        if character is None:
+            try:
+                win.set_character("", "")
+            except Exception:
+                pass
+            return
+        try:
+            win.set_character(character.id, character.name)
+        except Exception:
+            pass
+
+    def _on_open_history(self):
+        """打开非模态历史记录窗口（按当前所选角色过滤）。"""
+        character = self._character_manager.selected_character
+        if character is None:
+            InfoBar.info(
+                title="未选择角色",
+                content="请先选择一个角色再查看历史记录",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+            return
+
+        win = getattr(self, "_history_window", None)
+        if win is None:
+            win = AIVoiceHistoryWindow(self._main_window, download_callback=self._on_download_audio)
+            self._history_window = win
+        try:
+            win.set_character(character.id, character.name)
+        except Exception:
+            pass
+        try:
+            win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception:
+            pass
 
     def _refresh_character_list(self):
         """刷新角色列表"""
@@ -2677,14 +2747,26 @@ class AIVoiceInterface(QFrame):
                 for label in IndexTTSUtility.EMO_LABELS
             ]
 
-        # 临时输出路径（一次生成 3 个候选样本）
-        temp_dir = os.path.join(os.getcwd(), "temp_output")
-        os.makedirs(temp_dir, exist_ok=True)
-        ts = int(time.time())
-        output_paths = [
-            os.path.join(temp_dir, f"temp_{ts}_v{i + 1}.wav")
-            for i in range(3)
-        ]
+        # 输出路径与历史记录：按角色写入 temp_output/<角色>/，并生成序列文件名
+        try:
+            output_paths = tts_history_store.build_output_paths(character.id, character.name, count=3)
+        except Exception:
+            temp_dir = os.path.join(os.getcwd(), "temp_output")
+            os.makedirs(temp_dir, exist_ok=True)
+            ts = int(time.time())
+            output_paths = [os.path.join(temp_dir, f"temp_{ts}_v{i + 1}.wav") for i in range(3)]
+
+        # 组逻辑：合成文本不变则并入上一组；否则新建一组
+        try:
+            group_id = tts_history_store.get_or_create_group_id(character.id, character.name, text)
+        except Exception:
+            group_id = str(int(time.time() * 1000))
+        self._history_pending = {
+            "character_id": character.id,
+            "character_name": character.name,
+            "text": text,
+            "group_id": group_id,
+        }
 
         # 清空旧输出 UI，并预渲染 3 个样本为“生成中”遮罩态
         try:
@@ -2802,6 +2884,24 @@ class AIVoiceInterface(QFrame):
                 any_ok = False
             if any_ok:
                 self._set_output_empty_state(False)
+
+                # 写入历史记录（最多 3 个样本）
+                try:
+                    pending = getattr(self, "_history_pending", None) or {}
+                    cid = str(pending.get("character_id", ""))
+                    cname = str(pending.get("character_name", ""))
+                    gid = str(pending.get("group_id", ""))
+                    txt = str(pending.get("text", ""))
+                    if cid and gid:
+                        tts_history_store.append_samples(cid, cname, gid, txt, list(getattr(self, "_output_wav_paths", []) or []))
+                except Exception:
+                    pass
+
+                # 若历史窗口已打开，刷新内容
+                try:
+                    self._refresh_history_window_if_open()
+                except Exception:
+                    pass
             else:
                 # 没有任何样本产出：回到空态音符
                 try:
@@ -2819,6 +2919,12 @@ class AIVoiceInterface(QFrame):
             except Exception:
                 pass
             self._set_output_empty_state(True)
+
+        # 清理 pending
+        try:
+            self._history_pending = None
+        except Exception:
+            pass
 
     @Slot(bool)
     def _on_download_job_completed(self, success: bool):
