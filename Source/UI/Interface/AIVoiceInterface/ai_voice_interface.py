@@ -2,12 +2,14 @@
 AI 语音界面 - IndexTTS2
 
 """
-import os
 import time
+
+import os
+
 from typing import Optional
 
-from PySide6.QtCore import QStandardPaths, QUrl, QRunnable, QThreadPool, QObject, Signal, Slot, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence
+from PySide6.QtCore import QStandardPaths, QUrl, QRunnable, QThreadPool, QObject, Signal, Slot, Qt, QTimer, QEvent, QRect
+from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence, QAction
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -17,10 +19,17 @@ from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, InfoBar, InfoBarPosition,
     MessageBox, MessageBoxBase, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, RadioButton,
     Slider, StrongBodyLabel, TitleLabel,
-    ToolTipFilter, ToolTipPosition, TransparentToolButton
+    ToolTipFilter, ToolTipPosition, TransparentToolButton,
+    TeachingTip, TeachingTipTailPosition,
+    TextBrowser,
+)
+
+from Source.Utility.indextts_preflight_utility import (
+    IndexTTSPreflightUtility,
 )
 
 from Source.Utility.indextts_utility import IndexTTSUtility
+from Source.Utility.config_utility import config_utility
 from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterManager, Character
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
@@ -162,6 +171,130 @@ class DragDropOverlay(QWidget):
         painter.drawText(sub_rect, Qt.AlignmentFlag.AlignCenter, "支持 wav / mp3 / flac / ogg")
 
 
+class _ModalInputBlockerOverlay(QWidget):
+    """透明输入拦截层：用于让 TeachingTip 流程表现为“模态”。
+
+    设计目标：
+    - 不增加视觉元素（完全透明）
+    - 阻断主窗口内除 TeachingTip 外的点击/键盘操作
+    """
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setVisible(False)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self._spotlight_target: QWidget | None = None
+        self._spotlight_rect = None
+        self._spotlight_radius = 10
+        self._spotlight_margin = 8
+
+        try:
+            parent.installEventFilter(self)
+        except Exception:
+            pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            self.setGeometry(self.parentWidget().rect())
+        except Exception:
+            pass
+        try:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        try:
+            self.setFocus()
+        except Exception:
+            pass
+
+    def set_spotlight_target(self, target: QWidget | None, margin: int = 8, radius: int = 10):
+        """设置需要高亮的目标区域（镂空显示）。"""
+        self._spotlight_target = target
+        self._spotlight_margin = int(margin)
+        self._spotlight_radius = int(radius)
+        self._recompute_spotlight_rect()
+        self.update()
+
+    def _recompute_spotlight_rect(self):
+        if self._spotlight_target is None:
+            self._spotlight_rect = None
+            return
+        try:
+            # 目标控件的全局矩形映射到 overlay 坐标
+            top_left = self._spotlight_target.mapToGlobal(self._spotlight_target.rect().topLeft())
+            bottom_right = self._spotlight_target.mapToGlobal(self._spotlight_target.rect().bottomRight())
+            local_tl = self.mapFromGlobal(top_left)
+            local_br = self.mapFromGlobal(bottom_right)
+            r = QRect(local_tl, local_br).normalized()
+            r = r.adjusted(-self._spotlight_margin, -self._spotlight_margin, self._spotlight_margin, self._spotlight_margin)
+            self._spotlight_rect = r
+        except Exception:
+            self._spotlight_rect = None
+
+    def eventFilter(self, obj, event):
+        if obj == self.parentWidget():
+            try:
+                if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+                    self.setGeometry(self.parentWidget().rect())
+                    self._recompute_spotlight_rect()
+            except Exception:
+                pass
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        from PySide6.QtGui import QPainter, QColor, QPainterPath
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 说明：之前用 CompositionMode_Clear 在部分 Windows/显卡组合下会表现为“白板遮挡”，
+        # 看不到高亮区域内容。这里改为只绘制“暗层路径减去高亮区域”，避免依赖 Clear 合成模式。
+        try:
+            if self._spotlight_rect is None:
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 140))
+                return
+
+            dim_path = QPainterPath()
+            dim_path.addRect(self.rect())
+
+            hole = QPainterPath()
+            hole.addRoundedRect(self._spotlight_rect, self._spotlight_radius, self._spotlight_radius)
+
+            dim_path = dim_path.subtracted(hole)
+            painter.fillPath(dim_path, QColor(0, 0, 0, 140))
+        except Exception:
+            # 最差情况下也保证是“整体压暗”
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 140))
+
+    def mousePressEvent(self, event):
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()
+
+    def keyPressEvent(self, event):
+        event.accept()
+
+    def keyReleaseEvent(self, event):
+        event.accept()
+
+
 class DownloadModelChoiceDialog(MessageBoxBase):
     """下载模型方式选择弹窗（四个按钮，两行布局避免重叠）。"""
 
@@ -253,10 +386,11 @@ class EnvMissingInstallDialog(MessageBoxBase):
         super().__init__(parent)
         self.choice: str | None = None  # install/cancel
 
-        title = BodyLabel("环境缺失", self)
+        title = BodyLabel("下载独立的环境依赖", self)
         self.viewLayout.addWidget(title)
 
         content = BodyLabel(
+            "当前设备配置能够满足运行要求（可在终端查看检测输出），\n"
             "检测到运行所需的 Python 依赖未下载。\n"
             f"({details})\n\n"
             "是否立即下载依赖？下载过程可以去做其他事情~",
@@ -317,6 +451,305 @@ class EnvMissingInstallDialog(MessageBoxBase):
             self.widget.setMinimumWidth(max(620, w))
         except Exception:
             self.widget.setMinimumWidth(720)
+
+
+class IndexTTSPreflightDialog(MessageBoxBase):
+    """IndexTTS2 下载前设备预检弹窗。
+
+    - 若存在阻断项：仅允许关闭
+    - 若仅存在建议项：允许继续/取消
+    """
+
+    def __init__(self, parent, report_text: str, can_continue: bool):
+        super().__init__(parent)
+        self.choice: str | None = None  # continue/cancel/close
+
+        title = BodyLabel("运行设备检测", self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(report_text, self)
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 清空默认按钮布局里的两个按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_grid_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        if can_continue:
+            continue_btn = PrimaryPushButton(FluentIcon.ACCEPT, "继续下载", btn_grid_host)
+            cancel_btn = PushButton("取消", btn_grid_host)
+
+            for b in (continue_btn, cancel_btn):
+                b.setMinimumWidth(180)
+                b.setMinimumHeight(34)
+
+            grid.addWidget(continue_btn, 0, 0)
+            grid.addWidget(cancel_btn, 0, 1)
+
+            def _pick(v: str, accept: bool):
+                self.choice = v
+                if accept:
+                    self.accept()
+                else:
+                    self.reject()
+
+            continue_btn.clicked.connect(lambda: _pick("continue", True))
+            cancel_btn.clicked.connect(lambda: _pick("cancel", False))
+
+            try:
+                self.buttonGroup.setFixedHeight(24 + 34 + 24)
+            except Exception:
+                pass
+        else:
+            close_btn = PushButton("关闭", btn_grid_host)
+            close_btn.setMinimumWidth(180)
+            close_btn.setMinimumHeight(34)
+            grid.addWidget(close_btn, 0, 0)
+
+            def _close():
+                self.choice = "close"
+                self.reject()
+
+            close_btn.clicked.connect(_close)
+            try:
+                self.buttonGroup.setFixedHeight(24 + 34 + 24)
+            except Exception:
+                pass
+
+        self.buttonLayout.addWidget(btn_grid_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = min(920, int(avail.width() * 0.86))
+            else:
+                w = 820
+            self.widget.setMinimumWidth(max(680, w))
+        except Exception:
+            self.widget.setMinimumWidth(760)
+
+
+class AIVoiceWelcomeDialog(MessageBoxBase):
+    """首次进入 AI语音 的欢迎弹窗（非模态，不阻塞背景）。"""
+
+    def __init__(self, parent, on_start_guide):
+        super().__init__(parent)
+        self._on_start_guide = on_start_guide
+
+        title = TitleLabel("欢迎使用，", self)
+        # MessageBoxBase 的 viewLayout 会把第一个 widget 纵向拉伸，
+        # 这里固定标题高度，避免出现“标题与正文之间超大空白”。
+        try:
+            title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            title.setFixedHeight(title.sizeHint().height())
+        except Exception:
+            pass
+        self.viewLayout.addWidget(title)
+
+        # 使用 Markdown 提升可读性（Qt6 原生支持 setMarkdown）
+        md = (
+            "该 **AI 语音合成功能** 基于 IndexTTS2 开源模型，部署在本地电脑，可以把文本合成为自然语音，并支持通过参考音频复刻音色与风格。\n\n"
+
+            "**快速开始** 🎯\n\n"
+            "1. ⬇️ 下载依赖和模型\n"
+            "2. 👤 选择/创建角色\n"
+            "3. 🎧 导入参考音频\n"
+            "4. ✍️ 输入合成文本\n"
+            "5. 🔊 生成并在右侧试听/保存\n\n"
+
+            "**温馨提示** 💡\n\n"
+            "- 建议具备 **NVIDIA 独立显卡** ，并且显卡的显存在 10GB 以上\n"
+            "- 确保磁盘空间充足，下载独立依赖和模型分别占约 7GB 空间大小。没事，下载完后有独立按钮支持删除功能。\n"
+            "- 首次使用建议点击下方 **开始快速指引** 按钮进入快速指引环节。\n"
+        )
+
+        content = TextBrowser(self)
+        content.setReadOnly(True)
+        content.setOpenExternalLinks(True)
+        try:
+            content.setFrameShape(QFrame.Shape.NoFrame)
+        except Exception:
+            pass
+        content.setMarkdown(md)
+
+        # 适度放大字号（不引入新颜色/主题）
+        try:
+            content.setStyleSheet("QTextBrowser{font-size: 12pt;}")
+        except Exception:
+            pass
+
+        # 尽量一次性展示完整内容：隐藏滚动条并把内容区高度撑开
+        try:
+            content.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            content.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+
+        try:
+            text_width = 720
+            content.setMinimumWidth(text_width)
+            doc = content.document()
+            doc.setTextWidth(text_width)
+            doc.adjustSize()
+            doc_h = float(doc.size().height())
+            content.setFixedHeight(max(260, int(doc_h) + 12))
+        except Exception:
+            # 最差情况下给一个更大的高度，减少滚动出现
+            try:
+                content.setMinimumHeight(320)
+            except Exception:
+                pass
+
+        self.viewLayout.addWidget(content)
+
+        # 提升弹窗整体高度，避免显示原生滚动条
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                h = min(640, int(avail.height() * 0.76))
+            else:
+                h = 560
+            self.widget.setMinimumHeight(max(440, h))
+        except Exception:
+            pass
+
+        # 清空默认按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        try:
+            guide_icon = getattr(FluentIcon, "GUIDE")
+            start_btn = PrimaryPushButton(guide_icon, "开始快速指引", btn_host)
+        except Exception:
+            start_btn = PrimaryPushButton("开始快速指引", btn_host)
+        ok_btn = PushButton("OK，已了解", btn_host)
+        for b in (start_btn, ok_btn):
+            b.setMinimumWidth(170)
+            b.setMinimumHeight(34)
+
+        grid.addWidget(start_btn, 0, 0)
+        grid.addWidget(ok_btn, 0, 1)
+
+        start_btn.clicked.connect(self._handle_start)
+        ok_btn.clicked.connect(self._handle_ok)
+
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 24)
+        except Exception:
+            pass
+        self.buttonLayout.addWidget(btn_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        try:
+            self.widget.setMinimumWidth(780)
+        except Exception:
+            pass
+
+    def _handle_start(self):
+        try:
+            if callable(self._on_start_guide):
+                self._on_start_guide()
+        finally:
+            self.close()
+
+    def _handle_ok(self):
+        self.close()
+
+
+class AIVoiceQuickGuideStepDialog(MessageBoxBase):
+    """快速指引 - 单步弹窗（支持 下一步/跳过）。"""
+
+    def __init__(self, parent, step_title: str, step_desc: str, step_index: int, step_total: int):
+        super().__init__(parent)
+        self.choice: str | None = None  # next/skip
+
+        title = TitleLabel(f"快速指引（{step_index}/{step_total}）", self)
+        self.viewLayout.addWidget(title)
+
+        subtitle = StrongBodyLabel(step_title, self)
+        self.viewLayout.addWidget(subtitle)
+
+        content = BodyLabel(step_desc, self)
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 清空默认按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        try:
+            next_icon = getattr(FluentIcon, "RIGHT_ARROW")
+            next_btn = PrimaryPushButton(next_icon, "下一步", btn_host)
+        except Exception:
+            try:
+                next_icon = getattr(FluentIcon, "ARROW_RIGHT")
+                next_btn = PrimaryPushButton(next_icon, "下一步", btn_host)
+            except Exception:
+                next_btn = PrimaryPushButton("下一步", btn_host)
+        skip_btn = PushButton("跳过", btn_host)
+
+        for b in (next_btn, skip_btn):
+            b.setMinimumWidth(150)
+            b.setMinimumHeight(34)
+
+        grid.addWidget(next_btn, 0, 0)
+        grid.addWidget(skip_btn, 0, 1)
+
+        next_btn.clicked.connect(self._handle_next)
+        skip_btn.clicked.connect(self._handle_skip)
+
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 24)
+        except Exception:
+            pass
+        self.buttonLayout.addWidget(btn_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        try:
+            self.widget.setMinimumWidth(760)
+        except Exception:
+            pass
+
+    def _handle_next(self):
+        self.choice = "next"
+        self.accept()
+
+    def _handle_skip(self):
+        self.choice = "skip"
+        self.reject()
 
 
 class ModelDiagnosticsDialog(QDialog):
@@ -487,6 +920,16 @@ class AIVoiceInterface(QFrame):
 
         self.setObjectName("ai_voice_interface")
 
+        # AI 语音页的底色（各大组件/卡片之外的背景）
+        try:
+            self.setAutoFillBackground(True)
+        except Exception:
+            pass
+        try:
+            self.setStyleSheet("#ai_voice_interface { background-color: #e5e5e5; }")
+        except Exception:
+            pass
+
         # 角色管理器
         self._character_manager = CharacterManager()
 
@@ -518,6 +961,12 @@ class AIVoiceInterface(QFrame):
 
         self._init_ui()
         self._connect_signals()
+
+        # 首次使用引导（运行期缓存，避免多次弹出/被 GC）
+        self._welcome_dialog = None
+        self._quick_guide_dialog = None
+        self._quick_guide_step_index = 0
+        self._welcome_shown_runtime = False
 
     @staticmethod
     def _wrap_path_for_label(path: str) -> str:
@@ -664,6 +1113,8 @@ class AIVoiceInterface(QFrame):
         
         # 使用 CardWidget 包装
         panel = CardWidget(self)
+        # 供 TeachingTip/spotlight 锚定“模型控制”整个区域（而非单按钮）
+        self.model_control_panel_card = panel
         
         # 移除手动设置的阴影和背景色，使用 CardWidget 的默认主题样式
         # 这样可以保证在不同主题（亮/暗）下显示一致，且不会过亮
@@ -1058,6 +1509,8 @@ class AIVoiceInterface(QFrame):
     def _create_emotion_panel(self, parent_layout: QVBoxLayout):
         """创建情感控制面板"""
         card = CardWidget(self)
+        # 供 TeachingTip/spotlight 锚定“情感控制”整个区域（而非单选按钮）
+        self.emotion_control_panel_card = card
         card.setMinimumWidth(600)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(16, 16, 16, 16)
@@ -1307,6 +1760,11 @@ class AIVoiceInterface(QFrame):
         # 保存路径以防万一
         self._pending_save_dir = save_dir
 
+        # 下载模式：首次点击前做一次设备预检（删除模式不拦截）
+        if not getattr(self, "_is_delete_mode", False):
+            if not self._run_indextts_preflight_before_download(save_dir):
+                return
+
         # 若模型齐全但环境缺失：提供“下载环境依赖”入口（保持弹窗样式一致）
         if getattr(self, "_model_files_ok", False) and (not getattr(self, "_env_ok_fast", False)):
             self._show_fix_env_dialog(save_dir)
@@ -1319,6 +1777,43 @@ class AIVoiceInterface(QFrame):
 
         # 下载模式：先检查环境，再下载模型
         self._start_async_env_check(save_dir)
+
+    def _run_indextts_preflight_before_download(self, save_dir: str) -> bool:
+        """IndexTTS2 下载前设备预检。
+
+        - 通过：不打扰，直接进入下载流程
+        - 有建议项：弹窗提示，允许继续/取消
+        - 有阻断项：弹窗提示并阻止继续（避免下载后无法运行或下载失败）
+        """
+
+        if getattr(self, "_indextts_preflight_checked", False):
+            return True
+
+        result = IndexTTSPreflightUtility.run_check(save_dir)
+
+        # 结构化输出到运行时终端（便于排查用户环境问题）
+        try:
+            print(IndexTTSPreflightUtility.format_terminal_block(result), flush=True)
+        except Exception:
+            pass
+
+        if result.has_blockers:
+            report = IndexTTSPreflightUtility.format_report_text(result)
+            dialog = IndexTTSPreflightDialog(self._main_window, report, can_continue=False)
+            dialog.exec()
+            return False
+
+        if result.has_warnings:
+            report = IndexTTSPreflightUtility.format_report_text(result)
+            dialog = IndexTTSPreflightDialog(self._main_window, report, can_continue=True)
+            res = dialog.exec()
+            if res and dialog.choice == "continue":
+                self._indextts_preflight_checked = True
+                return True
+            return False
+
+        self._indextts_preflight_checked = True
+        return True
 
     def _show_fix_env_dialog(self, save_dir: str):
         """环境缺失但模型齐全时的弹窗入口：提供“下载环境依赖”按钮。"""
@@ -2383,6 +2878,542 @@ class AIVoiceInterface(QFrame):
         except Exception:
             pass
         self._set_output_empty_state(True)
+
+    # ==================== 首次使用引导 ====================
+
+    def show_first_time_welcome_from_project(self, force_every_time: bool = False):
+        """首次从“项目”进入“AI语音”时调用（非模态）。
+
+        force_every_time:
+            开发模式开关：为 True 时，每次进入 AI语音 都强制弹窗，且不写入“已确认”标记。
+        """
+        if not force_every_time and getattr(self, "_welcome_shown_runtime", False):
+            return
+
+        try:
+            confirmed = bool(config_utility.get_config("AIVoiceWelcomeShownConfirmed"))
+        except Exception:
+            confirmed = False
+
+        # 兼容：旧版本可能错误写入 AIVoiceWelcomeShown=True 但弹窗未成功展示
+        if confirmed and (not force_every_time):
+            return
+
+        try:
+            dlg = AIVoiceWelcomeDialog(self._main_window, on_start_guide=self.start_quick_guide)
+            try:
+                dlg.setModal(False)
+            except Exception:
+                pass
+            try:
+                dlg.setWindowModality(Qt.WindowModality.NonModal)
+            except Exception:
+                pass
+
+            dlg.show()
+            try:
+                dlg.raise_()
+                dlg.activateWindow()
+            except Exception:
+                pass
+
+            self._welcome_dialog = dlg
+            self._welcome_shown_runtime = True
+
+            # 仅在成功创建并 show 后才写入配置
+            if not force_every_time:
+                try:
+                    config_utility.set_config("AIVoiceWelcomeShown", True)
+                    config_utility.set_config("AIVoiceWelcomeShownConfirmed", True)
+                except Exception:
+                    pass
+
+            try:
+                print("[AIVoice] Welcome dialog shown", flush=True)
+            except Exception:
+                pass
+        except Exception as e:
+            # 不写配置，允许下次重试
+            try:
+                print(f"[AIVoice][WelcomeDialog][Error] {e}", flush=True)
+            except Exception:
+                pass
+
+    def start_quick_guide(self):
+        """启动 6 步快速指引。优先使用 TeachingTip（锚定），失败则回退为模态弹窗。"""
+        try:
+            if self._welcome_dialog is not None:
+                self._welcome_dialog.close()
+        except Exception:
+            pass
+
+        self._quick_guide_step_index = 0
+        # 让欢迎弹窗先完全关闭，再开始指引
+        QTimer.singleShot(120, lambda: self._run_quick_guide_step_teaching_tip(0))
+
+    def _ensure_teaching_tip_modal_blocker(self):
+        """开启透明输入拦截层，让 TeachingTip 流程表现为“模态”。"""
+        try:
+            if getattr(self, "_quick_guide_modal_overlay", None) is None and self._main_window is not None:
+                self._quick_guide_modal_overlay = _ModalInputBlockerOverlay(self._main_window)
+            overlay = getattr(self, "_quick_guide_modal_overlay", None)
+            if overlay is not None:
+                overlay.show()
+                overlay.raise_()
+        except Exception:
+            pass
+
+    def _update_teaching_tip_spotlight(self, target: QWidget | None):
+        """更新 spotlight 高亮区域。"""
+        overlay = getattr(self, "_quick_guide_modal_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.set_spotlight_target(target)
+        except Exception:
+            pass
+
+    def _teardown_teaching_tip_modal_blocker(self):
+        """关闭并释放透明输入拦截层。"""
+        overlay = getattr(self, "_quick_guide_modal_overlay", None)
+        if overlay is None:
+            return
+        try:
+            try:
+                overlay.set_spotlight_target(None)
+            except Exception:
+                pass
+            overlay.hide()
+        except Exception:
+            pass
+        try:
+            overlay.deleteLater()
+        except Exception:
+            pass
+        self._quick_guide_modal_overlay = None
+
+    def _add_teaching_tip_footer_buttons(self, view: QWidget, step_index: int, total: int):
+        """在 TeachingTipView 底部添加按钮。
+
+        """
+        try:
+            host = QWidget(view)
+            layout = QHBoxLayout(host)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+            layout.addStretch(1)
+
+            is_last = (step_index >= (total - 1))
+            if not is_last:
+                next_btn = PrimaryPushButton("下一步", host)
+                skip_btn = PushButton("跳过", host)
+                next_btn.setMinimumHeight(32)
+                skip_btn.setMinimumHeight(32)
+                next_btn.clicked.connect(lambda: self._on_teaching_tip_next(step_index))
+                skip_btn.clicked.connect(self._on_teaching_tip_skip)
+                layout.addWidget(next_btn)
+                layout.addWidget(skip_btn)
+            else:
+                finish_btn = PrimaryPushButton("恭喜完成指引！快去上手实操吧~", host)
+                finish_btn.setMinimumHeight(32)
+                finish_btn.clicked.connect(self._on_teaching_tip_finish)
+                layout.addWidget(finish_btn)
+
+            # TeachingTipView.addWidget 存在于 qfluentwidgets 1.10.5
+            view.addWidget(host)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def _configure_teaching_tip_view_for_wrapping(self, tip: QWidget, view: QWidget):
+        """尽量避免 TeachingTip 由于不换行导致的越界/超宽。"""
+        try:
+            from PySide6.QtWidgets import QLabel
+        except Exception:
+            QLabel = None  # type: ignore
+
+        max_content_w = 520
+        try:
+            win = getattr(self, "_main_window", None)
+            if win is not None and hasattr(win, "width"):
+                w = int(win.width())
+                # 适配：宽窗口用更舒适的宽度，小窗口跟随缩小
+                max_content_w = int(min(560, max(340, w * 0.45)))
+        except Exception:
+            pass
+
+        try:
+            if QLabel is not None:
+                title_label = view.findChild(QLabel, "titleLabel")
+                content_label = view.findChild(QLabel, "contentLabel")
+
+                if title_label is not None:
+                    try:
+                        title_label.setWordWrap(True)
+                        title_label.setMaximumWidth(max_content_w)
+                    except Exception:
+                        pass
+
+                if content_label is not None:
+                    try:
+                        content_label.setWordWrap(True)
+                        content_label.setMaximumWidth(max_content_w)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 给 view 也加一个上限，避免布局把窗口拉到非常宽
+        try:
+            view.setMaximumWidth(int(max_content_w + 72))
+        except Exception:
+            pass
+
+        try:
+            view.adjustSize()
+        except Exception:
+            pass
+        try:
+            tip.adjustSize()
+        except Exception:
+            pass
+
+    def _choose_teaching_tip_tail_position(self, target: QWidget, preferred):
+        """根据目标控件在屏幕中的位置，尽量选择更不容易被遮挡的 tailPosition。
+
+        约定：
+        - tip 在目标下方  -> tailPosition.TOP
+        - tip 在目标上方  -> tailPosition.BOTTOM
+        - tip 在目标右侧  -> tailPosition.LEFT
+        - tip 在目标左侧  -> tailPosition.RIGHT
+        """
+        try:
+            from PySide6.QtCore import QPoint, QRect
+            from PySide6.QtGui import QGuiApplication
+        except Exception:
+            return preferred
+
+        def _to_global_rect(w: QWidget):
+            try:
+                p = w.mapToGlobal(QPoint(0, 0))
+                return QRect(p, w.size())
+            except Exception:
+                return None
+
+        try:
+            rect = _to_global_rect(target)
+            if rect is None:
+                return preferred
+            screen = QGuiApplication.screenAt(rect.center())
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            if screen is None:
+                return preferred
+            avail = screen.availableGeometry()
+
+            above = rect.top() - avail.top()
+            below = avail.bottom() - rect.bottom()
+            left = rect.left() - avail.left()
+            right = avail.right() - rect.right()
+
+            # 粗略估计 TeachingTip 高度（含按钮），用于决定上下翻转
+            min_space = 190
+
+            # 先尊重 preferred
+            try:
+                if preferred == TeachingTipTailPosition.TOP and below >= min_space:
+                    return TeachingTipTailPosition.TOP
+                if preferred == TeachingTipTailPosition.BOTTOM and above >= min_space:
+                    return TeachingTipTailPosition.BOTTOM
+                if preferred == TeachingTipTailPosition.LEFT and right >= 260:
+                    return TeachingTipTailPosition.LEFT
+                if preferred == TeachingTipTailPosition.RIGHT and left >= 260:
+                    return TeachingTipTailPosition.RIGHT
+            except Exception:
+                pass
+
+            # 再做自适应选择
+            best = max(
+                [
+                    (below, TeachingTipTailPosition.TOP),
+                    (above, TeachingTipTailPosition.BOTTOM),
+                    (right, TeachingTipTailPosition.LEFT),
+                    (left, TeachingTipTailPosition.RIGHT),
+                ],
+                key=lambda x: x[0],
+            )[1]
+            return best
+        except Exception:
+            return preferred
+
+    def _get_quick_guide_steps(self):
+        return [
+            (
+                "模型控制\n",
+                "⬇️ 先点击“下载依赖和模型”完成准备，然后点击“加载模型”把模型加载到显存。"
+                "💡 首次使用需要优先完成下载与加载，再开始生成。"
+                "只需下载一次，后续使用只需点击“加载模型”即可，关闭程序会自动卸载模型。",
+                lambda: getattr(self, "model_control_panel_card", None) or getattr(self, "download_btn", None),
+                # 期望放在“模型控制”区域下方；空间不足时会自动翻转
+                TeachingTipTailPosition.TOP,
+            ),
+            (
+                "角色列表\n",
+                "👤 在这里选择/新增角色。每个角色 固定对应一个导入的音频。",
+                lambda: getattr(self, "character_list_widget", None),
+                TeachingTipTailPosition.LEFT,
+            ),
+            (
+                "导入参考音频\n",
+                "🎧 点击该区域导入参考音频，支持拖拽本地音频到界面导入。",
+                lambda: getattr(self, "ref_player_widget", None),
+                TeachingTipTailPosition.TOP,
+            ),
+            (
+                "合成文本\n",
+                "✍️ 在文本框输入要合成的内容，然后点击“生成音频”。支持 Alt+Enter 快捷键生成。",
+                lambda: getattr(self, "text_edit", None),
+                TeachingTipTailPosition.TOP,
+            ),
+            (
+                "情感控制\n",
+                "🎛️ 可选择“与参考相同”或“使用情感向量控制”。使用向量控制时可通过滑块调节语音情绪。",
+                lambda: getattr(self, "emotion_control_panel_card", None) or getattr(self, "emo_mode_same", None),
+                TeachingTipTailPosition.TOP,
+            ),
+            (
+                "生成结果\n",
+                "🔊 生成完成后会在右侧展示 3 个候选样本，可播放试听并保存到本地。",
+                # 空状态时 outputs_view 会被 QStackedLayout 隐藏，导致样本控件 isVisible=False。
+                # 这里改为锚定“生成结果”总容器，始终可见。
+                lambda: getattr(self, "_output_stack_host", None),
+                TeachingTipTailPosition.RIGHT,
+            ),
+        ]
+
+    def _close_current_teaching_tip(self):
+        tip = getattr(self, "_quick_guide_teaching_tip", None)
+        if tip is None:
+            return
+        try:
+            tip.close()
+        except Exception:
+            pass
+        try:
+            tip.deleteLater()
+        except Exception:
+            pass
+        self._quick_guide_teaching_tip = None
+
+    def _run_quick_guide_step_teaching_tip(self, step_index: int):
+        """TeachingTip 版本的引导。无法锚定/异常时回退到模态弹窗版本。"""
+        steps = self._get_quick_guide_steps()
+        total = len(steps)
+        if step_index < 0 or step_index >= total:
+            self._close_current_teaching_tip()
+            self._teardown_teaching_tip_modal_blocker()
+            return
+
+        step_title, step_desc, focus_getter, tail_pos = steps[step_index]
+
+        try:
+            target = focus_getter() if callable(focus_getter) else None
+        except Exception:
+            target = None
+
+        if target is None:
+            self._close_current_teaching_tip()
+            self._teardown_teaching_tip_modal_blocker()
+            self._run_quick_guide_step(step_index)
+            return
+
+        try:
+            if hasattr(target, "isVisible") and (not target.isVisible()):
+                # 不可见时很难锚定，直接回退
+                self._close_current_teaching_tip()
+                self._teardown_teaching_tip_modal_blocker()
+                self._run_quick_guide_step(step_index)
+                return
+        except Exception:
+            pass
+
+        # 尽量把焦点给到对应区域（非强制）
+        try:
+            target.setFocus()
+        except Exception:
+            pass
+
+        try:
+            # 让 TeachingTip 流程表现为“模态”：阻断背景操作
+            self._ensure_teaching_tip_modal_blocker()
+            self._update_teaching_tip_spotlight(target)
+            self._close_current_teaching_tip()
+            tip_title = f"快速指引（{step_index + 1}/{total}）·{step_title}"
+            # 根据屏幕可用空间做 tailPosition 自适应，尽量避免被遮挡
+            try:
+                tail_pos = self._choose_teaching_tip_tail_position(target, tail_pos)
+            except Exception:
+                pass
+
+            tip = TeachingTip.create(
+                target=target,
+                title=tip_title,
+                content=step_desc,
+                icon=None,
+                image=None,
+                isClosable=False,
+                duration=-1,
+                tailPosition=tail_pos,
+                parent=self._main_window,
+                isDeleteOnClose=True,
+            )
+            self._quick_guide_teaching_tip = tip
+
+            # 尝试设置窗口模态（有些平台/窗口旗标下可能不生效，但 overlay 会生效）
+            try:
+                tip.setWindowModality(Qt.WindowModality.ApplicationModal)
+            except Exception:
+                pass
+
+            # 确保 TeachingTip 在拦截层之上
+            try:
+                tip.raise_()
+                tip.activateWindow()
+            except Exception:
+                pass
+
+            # 由于 tip.raise_() 会改变 Z 序，这里再把 overlay raise 到下方一次，并刷新 spotlight
+            try:
+                overlay = getattr(self, "_quick_guide_modal_overlay", None)
+                if overlay is not None:
+                    overlay.raise_()
+                    tip.raise_()
+                self._update_teaching_tip_spotlight(target)
+            except Exception:
+                pass
+
+            view = getattr(tip, "view", None)
+            if view is None:
+                raise RuntimeError("TeachingTip.view 不可用")
+
+            # 提升可读性：标题更大加粗；标题/正文间隔一行
+            try:
+                view.setStyleSheet(
+                    "QLabel#titleLabel{font-size: 13pt; font-weight: 600;}"
+                    "QLabel#contentLabel{font-size: 12pt; margin-top: 8px;}"
+                )
+            except Exception:
+                pass
+
+            # 解决越界：启用换行 + 限制最大宽度
+            try:
+                self._configure_teaching_tip_view_for_wrapping(tip, view)
+            except Exception:
+                pass
+
+            # 底部按钮（可见）
+            self._add_teaching_tip_footer_buttons(view, step_index, total)
+
+        except Exception:
+            self._close_current_teaching_tip()
+            self._teardown_teaching_tip_modal_blocker()
+            self._run_quick_guide_step(step_index)
+
+    def _on_teaching_tip_next(self, current_index: int):
+        steps = self._get_quick_guide_steps()
+        total = len(steps)
+        next_idx = current_index + 1
+        self._close_current_teaching_tip()
+        if next_idx >= total:
+            self._teardown_teaching_tip_modal_blocker()
+            return
+        QTimer.singleShot(80, lambda: self._run_quick_guide_step_teaching_tip(next_idx))
+
+    def _on_teaching_tip_skip(self):
+        self._close_current_teaching_tip()
+        self._teardown_teaching_tip_modal_blocker()
+
+    def _on_teaching_tip_finish(self):
+        self._close_current_teaching_tip()
+        self._teardown_teaching_tip_modal_blocker()
+
+    def _run_quick_guide_step(self, step_index: int):
+        steps = [
+            (
+                "模型控制",
+                "先点击“下载依赖和模型”完成准备，然后点击“加载模型”把模型加载到显存。\n\n"
+                "建议：首次使用请优先完成下载与加载，再进行生成。",
+                lambda: getattr(self, "download_btn", None),
+            ),
+            (
+                "角色列表",
+                "在这里选择/新增角色。每个角色对应一套音色与参考音频配置。",
+                lambda: getattr(self, "character_list_widget", None),
+            ),
+            (
+                "导入参考音频",
+                "在“音色参考音频”区域导入参考音频，用于复刻音色。也支持拖拽音频到界面导入。",
+                lambda: getattr(self, "ref_player_widget", None),
+            ),
+            (
+                "合成文本",
+                "在文本框输入要合成的内容，然后点击“生成音频”。支持 Alt+Enter 快捷键生成。",
+                lambda: getattr(self, "text_edit", None),
+            ),
+            (
+                "情感控制",
+                "可选择“与参考相同”或“使用情感向量控制”。使用向量控制时可通过滑块调整风格。",
+                lambda: getattr(self, "emo_mode_same", None),
+            ),
+            (
+                "生成结果",
+                "生成完成后会在右侧展示 3 个候选样本，可播放试听并保存到本地。",
+                lambda: getattr(self, "_output_stack_host", None),
+            ),
+        ]
+
+        total = len(steps)
+        if step_index < 0 or step_index >= total:
+            self._quick_guide_dialog = None
+            return
+
+        title, desc, focus_getter = steps[step_index]
+
+        # 尽量把焦点给到对应区域（非强制）
+        try:
+            w = focus_getter() if callable(focus_getter) else None
+            if w is not None:
+                try:
+                    w.setFocus()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            dlg = AIVoiceQuickGuideStepDialog(
+                self._main_window,
+                step_title=title,
+                step_desc=desc,
+                step_index=step_index + 1,
+                step_total=total,
+            )
+
+            # 按你的要求：每步必须点“下一步”才能继续操作 => 使用模态 exec()
+            self._quick_guide_dialog = dlg
+            res = dlg.exec()
+
+            if res and dlg.choice == "next":
+                next_idx = step_index + 1
+                if next_idx >= total:
+                    self._quick_guide_dialog = None
+                    return
+                QTimer.singleShot(80, lambda: self._run_quick_guide_step(next_idx))
+                return
+
+            # skip / close
+            self._quick_guide_dialog = None
+        except Exception:
+            self._quick_guide_dialog = None
 
     def on_job_finished(self, success: bool):
         """Job 完成回调（由 MainWindow 调用）"""

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 import changelog
 import main
 from packaging.version import Version
-from PySide6.QtCore import QThread, QThreadPool
+from PySide6.QtCore import QThread, QThreadPool, QTimer
 from qfluentwidgets import FluentIcon, MSFluentWindow, NavigationItemPosition
 from Source.Job.external_source_job import ExternalSourceJob
 from Source.Job.game_project_job import GameProjectJob
@@ -25,6 +25,7 @@ from Source.Job.indextts_download_job import IndexTTSDownloadJob
 from Source.Job.indextts_env_job import IndexTTSEnvJob
 from Source.UI.Interface.AIVoiceInterface.ai_voice_interface import AIVoiceInterface
 from Source.Utility.config_utility import config_utility
+from Source.Utility.dev_config_utility import dev_config_utility
 from Source.Utility.wproj_utility import WprojUtility
 
 
@@ -70,7 +71,20 @@ class MainWindow(MSFluentWindow):
         self.setMicaEffectEnabled(True)
 
         self._changelog_window: Optional[ChangelogWindow] = None
+        self._last_interface_index: int | None = None
+        self._ai_voice_welcome_request_id: int = 0
         self.show_changelog()
+
+    def _show_ai_voice_welcome_if_still_current(self, request_id: int, force_every_time: bool = False):
+        """仅当计时结束时仍停留在 AI语音 页时才显示欢迎弹窗。"""
+        try:
+            if request_id != self._ai_voice_welcome_request_id:
+                return
+            if self.stackedWidget.currentWidget() != self.ai_voice_interface:
+                return
+            self.ai_voice_interface.show_first_time_welcome_from_project(force_every_time=force_every_time)
+        except Exception:
+            pass
 
     def init_title_bar(self):
         """设置窗口的自定义标题栏"""
@@ -126,11 +140,35 @@ class MainWindow(MSFluentWindow):
         当导航界面切换时调用的回调函数。
         index: 当前界面的索引
         """
+        prev = self._last_interface_index
+
+        # 任何切换都会作废此前挂起的欢迎弹窗计时器（避免切走后才弹出）
+        self._ai_voice_welcome_request_id += 1
+
         if index == self.stackedWidget.indexOf(self.setting_interface):
             self.setting_interface.refresh_project_setting_frame()
 
         if index == self.stackedWidget.indexOf(self.ai_voice_interface):
             self.ai_voice_interface.refresh()
+
+            # 首次从“项目”进入“AI语音”时：延迟 0.5s 弹非模态欢迎弹窗
+            try:
+                force_every_time = False
+                try:
+                    force_every_time = bool(dev_config_utility.force_ai_voice_welcome_every_time())
+                except Exception:
+                    force_every_time = False
+
+                if force_every_time or (prev == self.stackedWidget.indexOf(self.project_interface)):
+                    request_id = self._ai_voice_welcome_request_id
+                    QTimer.singleShot(
+                        500,
+                        lambda rid=request_id, force=force_every_time: self._show_ai_voice_welcome_if_still_current(rid, force),
+                    )
+            except Exception:
+                pass
+
+        self._last_interface_index = index
 
     def get_current_project_id(self) -> str | None:
         """获取当前选中的项目 ID"""
