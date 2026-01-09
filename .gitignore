@@ -43,6 +43,9 @@ temp_output/
 # 本地角色列表覆盖文件：运行时生成，仅本地保留
 config/characters.json
 
+# 本地开发开关覆盖文件：仅本地存在
+config/dev.json
+
 # ----------------------------
 # Keep embedded Python runtime
 # ----------------------------

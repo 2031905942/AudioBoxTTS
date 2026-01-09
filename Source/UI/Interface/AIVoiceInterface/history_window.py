@@ -1,9 +1,10 @@
 import os
+import sys
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 
 from qfluentwidgets import (
     BodyLabel,
@@ -12,6 +13,7 @@ from qfluentwidgets import (
     ScrollArea,
     StrongBodyLabel,
     FluentIcon,
+    TransparentToolButton,
 )
 
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ResultAudioPlayerWidget
@@ -41,12 +43,35 @@ class AIVoiceHistoryWindow(QWidget):
         root_layout.setContentsMargins(16, 16, 16, 16)
         root_layout.setSpacing(12)
 
-        self._title = StrongBodyLabel("历史记录", self)
-        root_layout.addWidget(self._title)
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        self._title = StrongBodyLabel("历史记录", header)
+        header_layout.addWidget(self._title, 0)
+        header_layout.addStretch(1)
+
+        self._open_folder_btn = TransparentToolButton(FluentIcon.FOLDER, header)
+        self._open_folder_btn.setToolTip("在文件资源管理器中打开当前角色语音文件夹")
+        self._open_folder_btn.setFixedSize(32, 32)
+        self._open_folder_btn.clicked.connect(self._open_current_character_folder)
+        header_layout.addWidget(self._open_folder_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        root_layout.addWidget(header)
 
         self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 隐藏将所有组包裹在一起的外框线
+        try:
+            self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        except Exception:
+            pass
+        try:
+            self._scroll.setStyleSheet("QScrollArea{border: none; background: transparent;}")
+        except Exception:
+            pass
 
         host = QWidget(self._scroll)
         self._host = host
@@ -62,7 +87,37 @@ class AIVoiceHistoryWindow(QWidget):
         self._character_id = str(character_id or "")
         self._character_name = str(character_name or "")
         self._title.setText(f"历史记录 - {self._character_name}" if self._character_name else "历史记录")
+        try:
+            self._open_folder_btn.setEnabled(bool(self._character_id))
+        except Exception:
+            pass
         self.reload()
+
+    def _open_current_character_folder(self):
+        if not self._character_id:
+            return
+        try:
+            folder = tts_history_store.get_character_dir(self._character_id, self._character_name)
+        except Exception:
+            folder = ""
+        if not folder:
+            return
+        # 不要在这里创建空目录：避免“改名后出现空文件夹”的错觉
+        if not os.path.isdir(folder):
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore[attr-defined]
+                return
+        except Exception:
+            pass
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        except Exception:
+            pass
 
     def reload(self):
         """Reload UI from temp_output history index."""
@@ -71,6 +126,12 @@ class AIVoiceHistoryWindow(QWidget):
         if not self._character_id:
             self._add_empty("未选择角色")
             return
+
+        # 打开历史时顺带裁剪缓存：每个角色最多保留 50 个 wav（按最早生成删除）
+        try:
+            tts_history_store.prune_character_cache(self._character_id, self._character_name, max_files=50)
+        except Exception:
+            pass
 
         entries = tts_history_store.load_entries(self._character_id, self._character_name, limit=50)
         if not entries:
@@ -96,6 +157,11 @@ class AIVoiceHistoryWindow(QWidget):
         self._list_layout.addStretch(1)
 
     def _clear_list(self):
+        # 先释放所有播放器句柄，避免 Windows 下目录改名/删除失败
+        try:
+            self.release_all_media()
+        except Exception:
+            pass
         layout = self._list_layout
         while layout.count():
             item = layout.takeAt(0)
@@ -105,6 +171,18 @@ class AIVoiceHistoryWindow(QWidget):
                     w.deleteLater()
                 except Exception:
                     pass
+
+    def release_all_media(self):
+        """释放历史窗口内所有播放器的媒体源（用于删除/改名文件夹前）。"""
+        try:
+            for w in self.findChildren(ResultAudioPlayerWidget):
+                try:
+                    if hasattr(w, "release_media"):
+                        w.release_media()
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _add_empty(self, msg: str):
         card = CardWidget(self._host)
@@ -130,10 +208,19 @@ class AIVoiceHistoryWindow(QWidget):
             t.setWordWrap(True)
         except Exception:
             pass
+        try:
+            t.setStyleSheet("font-size: 12pt;")
+        except Exception:
+            pass
         header_layout.addWidget(t)
 
         ts = _format_dt(int(group_time_ms or 0))
-        header_layout.addWidget(CaptionLabel("生成时间：" + (ts or ""), header))
+        time_label = BodyLabel("生成时间：" + (ts or ""), header)
+        try:
+            time_label.setStyleSheet("font-size: 11pt;")
+        except Exception:
+            pass
+        header_layout.addWidget(time_label)
         card_layout.addWidget(header)
 
         # samples
@@ -141,7 +228,8 @@ class AIVoiceHistoryWindow(QWidget):
             wav = str(e.get("wav_path", ""))
             if not wav or not os.path.exists(wav):
                 continue
-            w = ResultAudioPlayerWidget(f"样本 {i + 1}", card)
+            # 标题会自动显示 wav 文件名
+            w = ResultAudioPlayerWidget("音频", card)
             w.set_audio_path(wav)
             w.add_tool_button(
                 # keep consistent with result area

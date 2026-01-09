@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,18 +62,261 @@ class TTSHistoryStore:
         return self._base_dir
 
     def get_character_dir(self, character_id: str, character_name: str) -> str:
+        # New rule: folder name is only the (sanitized) nickname.
         safe_name = _sanitize_component(character_name)
-        suffix = (character_id or "")[:8] or "unknown"
-        folder = f"{safe_name}_{suffix}"
-        return os.path.join(self.base_dir, folder)
+        return os.path.join(self.base_dir, safe_name)
+
+    def resolve_existing_character_dir(self, character_id: str, character_name: str) -> str:
+        """返回该角色目录（当前命名规则下）。"""
+        return self.get_character_dir(character_id, character_name)
+
+    @staticmethod
+    def _is_reserved_dir_name(name: str) -> bool:
+        # temp_output/logs is used by the app; never treat it as a character folder.
+        return str(name or "").strip().lower() in {"logs"}
+
+    @staticmethod
+    def _pick_most_recent_dir(dirs: List[str]) -> str:
+        if not dirs:
+            return ""
+        try:
+            return max(dirs, key=lambda p: os.path.getmtime(p))
+        except Exception:
+            return dirs[0]
+
+    @staticmethod
+    def _iter_wavs(folder: str) -> List[str]:
+        if not folder or not os.path.isdir(folder):
+            return []
+        out: List[str] = []
+        try:
+            for fn in os.listdir(folder):
+                if fn.lower().endswith(".wav"):
+                    out.append(os.path.join(folder, fn))
+        except Exception:
+            return []
+        return out
+
+    @staticmethod
+    def _extract_seq_from_filename(filename: str) -> Optional[int]:
+        if not filename:
+            return None
+        m = re.search(r"(\d+)(?=\.wav$)", filename, flags=re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    def _rewrite_index_keep_existing(
+        self,
+        index_path: str,
+        *,
+        character_id: str,
+        character_name: str,
+        path_map: Optional[Dict[str, str]] = None,
+        keep_limit: int = 50,
+    ) -> int:
+        """压缩/修正 index：
+
+        - 只保留 wav 文件仍存在的行
+        - 可选应用 path_map（旧绝对路径 -> 新绝对路径）
+        - 更新 character_name
+        - 最多保留 keep_limit 条（按 created_at_ms 降序）
+
+        返回：最终写回的条数
+        """
+        if not index_path or not os.path.exists(index_path):
+            return 0
+
+        rows = self._read_index_lines(index_path)
+        fixed: List[Dict[str, Any]] = []
+
+        for r in rows:
+            try:
+                if str(r.get("character_id", "")) != str(character_id):
+                    continue
+
+                wav = str(r.get("wav_path", ""))
+                if path_map and wav in path_map:
+                    wav = str(path_map[wav])
+
+                if not wav or (not os.path.exists(wav)):
+                    continue
+
+                r["character_name"] = str(character_name)
+                r["wav_path"] = os.path.abspath(wav)
+                fixed.append(r)
+            except Exception:
+                continue
+
+        fixed.sort(key=lambda x: int(x.get("created_at_ms", 0) or 0), reverse=True)
+        if keep_limit and len(fixed) > int(keep_limit):
+            fixed = fixed[: int(keep_limit)]
+
+        try:
+            with open(index_path, "w", encoding="utf-8") as f:
+                for r in fixed:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        except Exception:
+            return 0
+
+        return len(fixed)
+
+    def delete_character_cache(self, character_id: str, character_name: str = "") -> int:
+        """删除该角色在 temp_output 下的整个 <昵称> 文件夹。
+
+        返回：删除的目录数量（0/1）
+        """
+        safe_name = _sanitize_component(character_name) if character_name else ""
+        if not safe_name or self._is_reserved_dir_name(safe_name):
+            return 0
+
+        desired = os.path.join(self.base_dir, safe_name)
+        if not os.path.isdir(desired):
+            return 0
+        try:
+            shutil.rmtree(desired)
+            return 1
+        except Exception:
+            # Windows 文件占用导致删除失败时，上层会提示用户停止播放后重试
+            return 0
+
+    def rename_character_cache(self, character_id: str, old_name: str, new_name: str) -> bool:
+        """角色改名时，同步更新 temp_output 下目录名与 wav 文件名前缀，并修正 history.jsonl。"""
+        new_safe = _sanitize_component(new_name)
+        old_safe = _sanitize_component(old_name)
+
+        if (not new_safe) or self._is_reserved_dir_name(new_safe):
+            return False
+
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        old_dir = os.path.join(self.base_dir, old_safe)
+        if not os.path.isdir(old_dir):
+            return False
+        target_dir = os.path.join(self.base_dir, new_safe)
+        if os.path.exists(target_dir):
+            return False
+        try:
+            os.rename(old_dir, target_dir)
+        except Exception:
+            return False
+
+        # 统一把 target_dir 内所有 wav 重命名为新前缀
+        path_map: Dict[str, str] = {}
+        for wav in self._iter_wavs(target_dir):
+            try:
+                # 注意：index 内记录的是“改名之前”的绝对路径（旧目录 + 旧文件名）。
+                # 这里构造 old_abs 用于映射更新。
+                old_abs = os.path.abspath(os.path.join(old_dir, os.path.basename(wav)))
+                seq = self._extract_seq_from_filename(os.path.basename(wav))
+                if seq is None:
+                    continue
+                new_abs = os.path.join(target_dir, f"{new_safe}_{seq}.wav")
+                if os.path.abspath(old_abs) == os.path.abspath(new_abs):
+                    continue
+                if os.path.exists(new_abs):
+                    j = seq
+                    while os.path.exists(new_abs) and j < seq + 10000:
+                        j += 1
+                        new_abs = os.path.join(target_dir, f"{new_safe}_{j}.wav")
+                # wav 当前实际在 target_dir 下，但文件名仍是旧名；用当前路径执行 rename。
+                os.replace(os.path.abspath(wav), new_abs)
+                path_map[old_abs] = os.path.abspath(new_abs)
+            except Exception:
+                continue
+
+        # 修正/压缩 index
+        try:
+            index_path = os.path.join(target_dir, self.INDEX_FILENAME)
+            self._rewrite_index_keep_existing(
+                index_path,
+                character_id=str(character_id),
+                character_name=str(new_name),
+                path_map=path_map,
+                keep_limit=50,
+            )
+        except Exception:
+            pass
+
+        return True
+
+    def prune_character_cache(self, character_id: str, character_name: str, max_files: int = 50) -> int:
+        """将该角色目录内 wav 文件数量裁剪到最多 max_files 个。
+
+        按 mtime 从旧到新删除最早的；同时压缩 history.jsonl 以移除失效条目。
+
+        返回：删除的 wav 数量
+        """
+        max_files = int(max(0, max_files))
+
+        # Only prune existing folder; never create empty folders here.
+        d = self.get_character_dir(character_id, character_name)
+        if not d or (not os.path.isdir(d)):
+            return 0
+
+        wavs = self._iter_wavs(d)
+        if max_files <= 0:
+            removed = 0
+            for p in wavs:
+                try:
+                    os.remove(p)
+                    removed += 1
+                except Exception:
+                    pass
+            try:
+                idx = os.path.join(d, self.INDEX_FILENAME)
+                if os.path.exists(idx):
+                    os.remove(idx)
+            except Exception:
+                pass
+            return removed
+
+        # 删除超出的最早文件
+        removed = 0
+        try:
+            wavs.sort(key=lambda p: os.path.getmtime(p))
+        except Exception:
+            pass
+
+        if len(wavs) > max_files:
+            for p in wavs[: len(wavs) - max_files]:
+                try:
+                    os.remove(p)
+                    removed += 1
+                except Exception:
+                    pass
+
+        # 压缩 index（只保留仍存在的，并最多 max_files 条）
+        try:
+            idx = os.path.join(d, self.INDEX_FILENAME)
+            self._rewrite_index_keep_existing(
+                idx,
+                character_id=str(character_id),
+                character_name=str(character_name),
+                path_map=None,
+                keep_limit=max_files,
+            )
+        except Exception:
+            pass
+
+        return removed
 
     def get_index_path(self, character_id: str, character_name: str) -> str:
+        # For writing, always use the current naming rule folder.
         return os.path.join(self.get_character_dir(character_id, character_name), self.INDEX_FILENAME)
 
     def ensure_character_dir(self, character_id: str, character_name: str) -> str:
-        d = self.get_character_dir(character_id, character_name)
-        os.makedirs(d, exist_ok=True)
-        return d
+        safe_name = _sanitize_component(character_name)
+        if self._is_reserved_dir_name(safe_name):
+            # Avoid clobbering temp_output/logs.
+            safe_name = "role"
+
+        target = os.path.join(self.base_dir, safe_name)
+        os.makedirs(target, exist_ok=True)
+        return target
 
     def _read_index_lines(self, index_path: str) -> List[Dict[str, Any]]:
         if not os.path.exists(index_path):
@@ -214,6 +458,12 @@ class TTSHistoryStore:
                     f.write(line + "\n")
         except Exception:
             return 0, 0
+
+        # 每个角色目录最多保留 50 个 wav；超出删除最早生成的
+        try:
+            self.prune_character_cache(character_id, character_name, max_files=50)
+        except Exception:
+            pass
 
         return appended, group_time
 

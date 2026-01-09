@@ -30,6 +30,7 @@ from Source.Utility.indextts_preflight_utility import (
 
 from Source.Utility.indextts_utility import IndexTTSUtility
 from Source.Utility.config_utility import config_utility
+from Source.Utility.dev_config_utility import dev_config_utility
 from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterManager, Character
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
@@ -565,11 +566,11 @@ class AIVoiceWelcomeDialog(MessageBoxBase):
             "该 **AI 语音合成功能** 基于 IndexTTS2 开源模型，部署在本地电脑，可以把文本合成为自然语音，并支持通过参考音频复刻音色与风格。\n\n"
 
             "**快速开始** 🎯\n\n"
-            "1. ⬇️ 下载依赖和模型\n"
+            "1. ⬇️ 下载依赖和模型并加载\n"
             "2. 👤 选择/创建角色\n"
             "3. 🎧 导入参考音频\n"
             "4. ✍️ 输入合成文本\n"
-            "5. 🔊 生成并在右侧试听/保存\n\n"
+            "5. 🔊 生成并在历史记录批量试听/保存\n\n"
 
             "**温馨提示** 💡\n\n"
             "- 建议具备 **NVIDIA 独立显卡** ，并且显卡的显存在 10GB 以上\n"
@@ -648,7 +649,7 @@ class AIVoiceWelcomeDialog(MessageBoxBase):
             start_btn = PrimaryPushButton(guide_icon, "开始快速指引", btn_host)
         except Exception:
             start_btn = PrimaryPushButton("开始快速指引", btn_host)
-        ok_btn = PushButton("OK，已了解", btn_host)
+        ok_btn = PushButton("OK，不再显示", btn_host)
         for b in (start_btn, ok_btn):
             b.setMinimumWidth(170)
             b.setMinimumHeight(34)
@@ -678,6 +679,11 @@ class AIVoiceWelcomeDialog(MessageBoxBase):
             self.close()
 
     def _handle_ok(self):
+        # 仅当用户点击“OK，不再显示”时，才写入本地覆盖配置（force=false）
+        try:
+            dev_config_utility.set_force_ai_voice_welcome_every_time(False)
+        except Exception:
+            pass
         self.close()
 
 
@@ -1429,7 +1435,8 @@ class AIVoiceInterface(QFrame):
         self.output_player_widgets = []
 
         for i in range(3):
-            w = ResultAudioPlayerWidget(f"样本 {i + 1}", outputs_view)
+            # 标题将随 wav 文件名变化；空态时使用不带序号的占位标题
+            w = ResultAudioPlayerWidget("音频", outputs_view)
             w.add_tool_button(
                 FluentIcon.DOWNLOAD,
                 "保存音频",
@@ -1468,6 +1475,142 @@ class AIVoiceInterface(QFrame):
             self._output_stack.setCurrentIndex(1)
             # 非空态会显著增加内容高度：主动让主窗口增高，避免控件被挤压造成“视觉重叠”
             self._grow_window_to_fit_contents()
+        except Exception:
+            pass
+
+    def _clear_output_results(self) -> None:
+        """清空生成结果区域（3 个样本卡片 + 内部路径数组），并回到空态音符。"""
+        try:
+            self._output_wav_paths = ["", "", ""]
+        except Exception:
+            pass
+
+        # 先释放媒体句柄，避免 Windows 下删除/改名卡住
+        try:
+            for w in getattr(self, "output_player_widgets", []) or []:
+                try:
+                    if hasattr(w, "release_media"):
+                        w.release_media()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            for w in getattr(self, "output_player_widgets", []) or []:
+                try:
+                    w.set_audio_path("")
+                except Exception:
+                    pass
+                try:
+                    w.set_loading(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self._set_output_empty_state(True)
+        except Exception:
+            pass
+
+    def _sync_output_results_after_rename(self, character_id: str, old_name: str, new_name: str) -> None:
+        """角色改名成功后，同步生成结果区域中已展示的样本路径/标题。
+
+        目标：输出区展示的 3 条若来自该角色目录，则将其映射到新目录/新文件名。
+        """
+        try:
+            old_dir = str(tts_history_store.get_character_dir(character_id, old_name) or "")
+            new_dir = str(tts_history_store.get_character_dir(character_id, new_name) or "")
+        except Exception:
+            return
+
+        def _is_under_dir(path: str, base_dir: str) -> bool:
+            try:
+                if not path or not base_dir:
+                    return False
+                return os.path.commonpath([os.path.abspath(path), os.path.abspath(base_dir)]) == os.path.abspath(base_dir)
+            except Exception:
+                return False
+
+        new_paths: list[str] = ["", "", ""]
+        try:
+            cur_paths = list(getattr(self, "_output_wav_paths", []) or [])
+        except Exception:
+            cur_paths = []
+
+        # 保持长度为 3
+        while len(cur_paths) < 3:
+            cur_paths.append("")
+
+        for i in range(3):
+            p = str(cur_paths[i] or "")
+            if not p:
+                continue
+
+            # 只处理位于旧角色目录下的输出
+            if not _is_under_dir(p, old_dir):
+                # 可能已经是新路径（或不属于该角色），原样保留
+                if os.path.exists(p):
+                    new_paths[i] = p
+                continue
+
+            base = os.path.basename(p)
+            candidates: list[str] = []
+
+            # 1) 优先：目录改为 new_dir，文件名前缀 old_name -> new_name
+            try:
+                if base.startswith(f"{old_name}_"):
+                    candidates.append(os.path.join(new_dir, f"{new_name}_" + base[len(old_name) + 1 :]))
+            except Exception:
+                pass
+
+            # 2) 兜底：仅替换目录（若文件名本身未改/已改）
+            try:
+                candidates.append(os.path.join(new_dir, base))
+            except Exception:
+                pass
+
+            # 3) 最后兜底：按序号猜测（常见规则：<name>_1.wav.._3.wav）
+            try:
+                candidates.append(os.path.join(new_dir, f"{new_name}_{i + 1}.wav"))
+            except Exception:
+                pass
+
+            chosen = ""
+            for c in candidates:
+                try:
+                    if c and os.path.exists(c):
+                        chosen = c
+                        break
+                except Exception:
+                    continue
+
+            new_paths[i] = chosen
+
+        # 应用到状态与控件
+        try:
+            self._output_wav_paths = new_paths
+        except Exception:
+            pass
+
+        try:
+            widgets = list(getattr(self, "output_player_widgets", []) or [])
+        except Exception:
+            widgets = []
+
+        for i in range(min(3, len(widgets))):
+            try:
+                widgets[i].set_audio_path(new_paths[i])
+            except Exception:
+                pass
+
+        try:
+            any_ok = any(p and os.path.exists(p) for p in new_paths)
+        except Exception:
+            any_ok = False
+        try:
+            self._set_output_empty_state(not bool(any_ok))
         except Exception:
             pass
 
@@ -1628,6 +1771,39 @@ class AIVoiceInterface(QFrame):
         self._main_window.indextts_download_job.job_completed.connect(self._on_download_job_completed)
 
     # ==================== 角色管理 ====================
+    def _is_character_name_unique(self, name: str, *, exclude_id: str | None = None) -> bool:
+        try:
+            candidate = str(name or "").strip()
+        except Exception:
+            candidate = ""
+        if not candidate:
+            return False
+
+        # Prevent clobbering temp_output/logs
+        try:
+            safe_dir = os.path.basename(tts_history_store.get_character_dir("", candidate))
+            if str(safe_dir).strip().lower() == "logs":
+                return False
+        except Exception:
+            pass
+
+        try:
+            candidate_key = candidate.lower()
+        except Exception:
+            candidate_key = candidate
+
+        for c in self._character_manager.characters:
+            try:
+                if exclude_id and str(getattr(c, "id", "")) == str(exclude_id):
+                    continue
+                n = str(getattr(c, "name", "") or "").strip()
+                if not n:
+                    continue
+                if n.lower() == candidate_key:
+                    return False
+            except Exception:
+                continue
+        return True
 
     def _on_add_character(self):
         """添加新角色"""
@@ -1645,6 +1821,15 @@ class AIVoiceInterface(QFrame):
         if dialog.exec():
             name, avatar_path = dialog.get_data()
             if name:
+                if not self._is_character_name_unique(str(name)):
+                    InfoBar.error(
+                        title="昵称不可用",
+                        content="角色昵称必须唯一，且不能使用 logs 作为昵称",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=3500,
+                    )
+                    return
                 character = self._character_manager.add(name, avatar_path)
                 if character:
                     self._refresh_character_list()
@@ -1679,6 +1864,8 @@ class AIVoiceInterface(QFrame):
         if not character:
             return
 
+        old_name = str(getattr(character, "name", "") or "")
+
         dialog = CharacterDialog(
             self._main_window,
             character_name=character.name,
@@ -1687,12 +1874,60 @@ class AIVoiceInterface(QFrame):
         if dialog.exec():
             name, avatar_path = dialog.get_data()
             if name:
+                if (str(name).strip() != old_name.strip()) and (not self._is_character_name_unique(str(name), exclude_id=character_id)):
+                    InfoBar.error(
+                        title="昵称不可用",
+                        content="角色昵称必须唯一，且不能使用 logs 作为昵称",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=3500,
+                    )
+                    return
                 self._character_manager.update(
                     character_id,
                     name=name,
                     avatar_path=avatar_path
                 )
+
+                # 同步更新 temp_output 下的角色目录与样本文件名
+                try:
+                    if str(name) and str(name) != old_name:
+                        # Windows 下若 wav 正在被播放器占用，目录改名会失败（表现为只新建空目录）
+                        try:
+                            win = getattr(self, "_history_window", None)
+                            if win is not None and hasattr(win, "release_all_media"):
+                                win.release_all_media()
+                        except Exception:
+                            pass
+                        try:
+                            for w in getattr(self, "output_player_widgets", []) or []:
+                                if hasattr(w, "release_media"):
+                                    w.release_media()
+                        except Exception:
+                            pass
+                        ok = bool(tts_history_store.rename_character_cache(character_id, old_name, str(name)))
+                        if not ok:
+                            InfoBar.warning(
+                                title="历史缓存改名失败",
+                                content="可能有音频仍在播放/占用文件，建议停止播放或关闭历史窗口后重试",
+                                parent=self,
+                                position=InfoBarPosition.TOP,
+                                duration=4500,
+                            )
+                        else:
+                            # 同步刷新生成结果区域显示的文件名/路径
+                            try:
+                                self._sync_output_results_after_rename(character_id, old_name, str(name))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 self._refresh_character_list()
+                try:
+                    self._refresh_history_window_if_open()
+                except Exception:
+                    pass
                 InfoBar.success(
                     title="角色更新成功",
                     content=f"已更新角色: {name}",
@@ -1713,8 +1948,54 @@ class AIVoiceInterface(QFrame):
             self._main_window
         )
         if msg.exec():
+            # 删除角色时，一并清理 temp_output 下该角色的音频文件夹
+            try:
+                # Windows 下若 wav 正在被播放器占用，删除会失败（表现为只删掉 history.jsonl 或无变化）
+                try:
+                    win = getattr(self, "_history_window", None)
+                    if win is not None and hasattr(win, "release_all_media"):
+                        win.release_all_media()
+                except Exception:
+                    pass
+                try:
+                    for w in getattr(self, "output_player_widgets", []) or []:
+                        if hasattr(w, "release_media"):
+                            w.release_media()
+                except Exception:
+                    pass
+                removed = int(tts_history_store.delete_character_cache(character_id, str(getattr(character, "name", "") or "")))
+                if removed <= 0:
+                    InfoBar.warning(
+                        title="缓存删除可能失败",
+                        content="可能有音频仍在播放/占用文件，建议停止播放或关闭历史窗口后再删除",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=4500,
+                    )
+            except Exception:
+                pass
             self._character_manager.delete(character_id)
             self._refresh_character_list()
+
+            # 删除角色后：切换到新的选中角色并清空生成结果区域（避免残留已被删除的 wav）
+            try:
+                next_id = self._character_manager.selected_id
+                if next_id:
+                    self._select_character(next_id)
+                else:
+                    self._update_reference_audio_display()
+                    self._update_generate_btn_state()
+            except Exception:
+                pass
+            try:
+                self._clear_output_results()
+            except Exception:
+                pass
+
+            try:
+                self._refresh_history_window_if_open()
+            except Exception:
+                pass
             InfoBar.success(
                 title="角色已删除",
                 content=f"已删除角色: {character.name}",
@@ -2987,23 +3268,24 @@ class AIVoiceInterface(QFrame):
 
     # ==================== 首次使用引导 ====================
 
-    def show_first_time_welcome_from_project(self, force_every_time: bool = False):
-        """首次从“项目”进入“AI语音”时调用（非模态）。
+    def show_first_time_welcome_from_project(self) -> bool:
+        """每次应用启动后，首次进入 AI语音 时调用（非模态）。
 
-        force_every_time:
-            开发模式开关：为 True 时，每次进入 AI语音 都强制弹窗，且不写入“已确认”标记。
+        规则：
+        - 由 dev_config_utility.force_ai_voice_welcome_every_time() 控制是否展示
+        - force=true 时，本次进程只展示一次（不是每次切页都弹）
+        - 只有点击“OK，不再显示”才会写入本地 dev.json(force=false)
+
+        返回：本次是否成功展示
         """
-        if not force_every_time and getattr(self, "_welcome_shown_runtime", False):
-            return
-
         try:
-            confirmed = bool(config_utility.get_config("AIVoiceWelcomeShownConfirmed"))
+            if not bool(dev_config_utility.force_ai_voice_welcome_every_time()):
+                return False
         except Exception:
-            confirmed = False
+            return False
 
-        # 兼容：旧版本可能错误写入 AIVoiceWelcomeShown=True 但弹窗未成功展示
-        if confirmed and (not force_every_time):
-            return
+        if getattr(self, "_welcome_shown_runtime", False):
+            return False
 
         try:
             dlg = AIVoiceWelcomeDialog(self._main_window, on_start_guide=self.start_quick_guide)
@@ -3026,24 +3308,17 @@ class AIVoiceInterface(QFrame):
             self._welcome_dialog = dlg
             self._welcome_shown_runtime = True
 
-            # 仅在成功创建并 show 后才写入配置
-            if not force_every_time:
-                try:
-                    config_utility.set_config("AIVoiceWelcomeShown", True)
-                    config_utility.set_config("AIVoiceWelcomeShownConfirmed", True)
-                except Exception:
-                    pass
-
             try:
                 print("[AIVoice] Welcome dialog shown", flush=True)
             except Exception:
                 pass
+            return True
         except Exception as e:
-            # 不写配置，允许下次重试
             try:
                 print(f"[AIVoice][WelcomeDialog][Error] {e}", flush=True)
             except Exception:
                 pass
+            return False
 
     def start_quick_guide(self):
         """启动 6 步快速指引。优先使用 TeachingTip（锚定），失败则回退为模态弹窗。"""
@@ -3256,8 +3531,7 @@ class AIVoiceInterface(QFrame):
             (
                 "模型控制\n",
                 "⬇️ 先点击“下载依赖和模型”完成准备，然后点击“加载模型”把模型加载到显存。"
-                "💡 首次使用需要优先完成下载与加载，再开始生成。"
-                "只需下载一次，后续使用只需点击“加载模型”即可，关闭程序会自动卸载模型。",
+                "💡 只需下载一次，后续使用只需点击“加载模型”即可，关闭程序会自动卸载模型。",
                 lambda: getattr(self, "model_control_panel_card", None) or getattr(self, "download_btn", None),
                 # 期望放在“模型控制”区域下方；空间不足时会自动翻转
                 TeachingTipTailPosition.TOP,
@@ -3270,7 +3544,7 @@ class AIVoiceInterface(QFrame):
             ),
             (
                 "导入参考音频\n",
-                "🎧 点击该区域导入参考音频，支持拖拽本地音频到界面导入。",
+                "🎧 点击该区域导入参考音频，支持拖拽本地文件导入。",
                 lambda: getattr(self, "ref_player_widget", None),
                 TeachingTipTailPosition.TOP,
             ),
@@ -3288,7 +3562,7 @@ class AIVoiceInterface(QFrame):
             ),
             (
                 "生成结果\n",
-                "🔊 生成完成后会在右侧展示 3 个候选样本，可播放试听并保存到本地。",
+                "🔊 生成完成后会在右侧展示 3 个候选样本，并可点击历史记录查看以往生成结果。",
                 # 空状态时 outputs_view 会被 QStackedLayout 隐藏，导致样本控件 isVisible=False。
                 # 这里改为锚定“生成结果”总容器，始终可见。
                 lambda: getattr(self, "_output_stack_host", None),

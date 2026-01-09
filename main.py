@@ -9,7 +9,7 @@ from PySide6.QtCore import qInstallMessageHandler, QtMsgType
 
 from qfluentwidgets import setTheme, setThemeColor, Theme
 
-APP_VERSION: str = "251225.1"
+APP_VERSION: str = "260109.1"
 ROOT_PATH = str(pathlib.Path(__file__).parent).replace("\\", "/")
 
 

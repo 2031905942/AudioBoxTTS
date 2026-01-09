@@ -30,18 +30,6 @@ class GameProjectUtility(FileUtility, SVNUtility):
                 "Password":          "Guest"
             },
         },
-        "Burner-Trunk":              {
-            "SVNTrunkPath":               {
-                "RemotePath":        "http://svn.mxhzw.com/svn/burner/trunk/client/burner",
-                "LocalRelativePath": "BurnerTrunk"
-            },
-            "AudioBoxUnityWwiseBankPath": "BurnerTrunk/WwiseBank",
-            "SVNWwiseProjectPath":        {
-                "RemotePath":        "svn://10.90.62.20/audio/Project/Burner/Wwise",
-                "LocalRelativePath": "BurnerWwise"
-            },
-            "AudioBoxWwiseProjectPath":   "BurnerWwise/Burner/Burner.wproj",
-        },
         "Dawn-Trunk":                {
             "SVNTrunkPath":               {
                 "RemotePath":        "svn://10.86.239.36/dawn/trunk",
@@ -73,6 +61,18 @@ class GameProjectUtility(FileUtility, SVNUtility):
             },
             "AudioBoxWwiseProjectPath":   "GirlsNewGirls_HD3WarCardWwise/NewGirlsWarCard/NewGirlsWarCard.wproj",
         },
+        "Lovania-Release": {
+            "SVNTrunkPath":               {
+                "RemotePath":        "svn://192.168.12.28/lovania/release/release",
+                "LocalRelativePath": "LovaniaRelease"
+            },
+            "AudioBoxUnityWwiseBankPath": "LovaniaRelease/Bin/WwiseBank",
+            "SVNWwiseProjectPath":        {
+                "RemotePath":        "svn://192.168.12.28/lovania_audio/release",
+                "LocalRelativePath": "LovaniaWwiseRelease"
+            },
+            "AudioBoxWwiseProjectPath":   "LovaniaWwiseRelease/Lovania/Lovania.wproj",
+        },
         "Lovania-Trunk":             {
             "SVNTrunkPath":               {
                 "RemotePath":        "svn://192.168.12.28/lovania/trunk",
@@ -80,10 +80,10 @@ class GameProjectUtility(FileUtility, SVNUtility):
             },
             "AudioBoxUnityWwiseBankPath": "LovaniaTrunk/Bin/WwiseBank",
             "SVNWwiseProjectPath":        {
-                "RemotePath":        "svn://192.168.12.28/lovania_audio/Project/Lovania",
-                "LocalRelativePath": "LovaniaWwise/Lovania"
+                "RemotePath":        "svn://192.168.12.28/lovania_audio/trunk",
+                "LocalRelativePath": "LovaniaWwiseTrunk"
             },
-            "AudioBoxWwiseProjectPath":   "LovaniaWwise/Lovania/Lovania.wproj",
+            "AudioBoxWwiseProjectPath":   "LovaniaWwiseTrunk/Lovania/Lovania.wproj",
         },
         "SS-Trunk":                  {
             "SVNTrunkPath":               {
@@ -97,18 +97,6 @@ class GameProjectUtility(FileUtility, SVNUtility):
             },
             "AudioBoxWwiseProjectPath":   "SSWwise/SS/SS.wproj",
         },
-        # "WarCard-Trunk": {
-        #     "SVNTrunkPath":               {
-        #         "RemotePath":        "http://svn.mxhzw.com/svn/WarCard/trunk",
-        #         "LocalRelativePath": "WarCardTrunk"
-        #     },
-        #     "AudioBoxUnityWwiseBankPath": "GirlsNewGirls_HD3WarCard/Assets/GirlsGame/Editor/Resources/Wwise/Banks",
-        #     "SVNWwiseProjectPath":        {
-        #         "RemotePath":        "svn://10.90.62.20/audio/Project/NewGirlsWarCard/Wwise",
-        #         "LocalRelativePath": "WarCardWwise"
-        #     },
-        #     "AudioBoxWwiseProjectPath":   "WarCardWwise/NewGirlsWarCard/NewGirlsWarCard.wproj",
-        # },
     }
 
     def __init__(self, game_project_job):

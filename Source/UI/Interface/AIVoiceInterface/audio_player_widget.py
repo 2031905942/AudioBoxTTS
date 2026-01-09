@@ -2,6 +2,7 @@ import os
 import math
 import numpy as np
 import soundfile as sf
+from datetime import datetime
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QSize, QPoint
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QAction, QFont, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -120,7 +121,7 @@ class WaveformWidget(QWidget):
                 self._bars = bars
                 self.update()
         except Exception as e:
-            print(f"Error loading waveform: {e}")
+            # 避免在终端刷屏（历史记录可能一次加载很多条）
             self._generate_dummy_data()
 
     def set_progress(self, progress):
@@ -264,6 +265,8 @@ class AudioPlayerWidget(CardWidget):
     ):
         super().__init__(parent)
         self._audio_path = ""
+        # QMediaPlayer 懒加载：避免在列表渲染阶段对每个音频都触发底层探测/日志输出
+        self._player_source_path = ""
         self._duration = 0
         self._is_playing = False
         self._compact_mode = compact_mode
@@ -280,6 +283,148 @@ class AudioPlayerWidget(CardWidget):
         
         self._init_ui(title)
         self._init_player()
+
+    @staticmethod
+    def _format_datetime_from_mtime(path: str) -> str:
+        try:
+            ts = os.path.getmtime(path)
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _guess_bit_depth_from_subtype(subtype: str) -> int | None:
+        s = str(subtype or "").upper()
+        # 常见：PCM_16 / PCM_24 / PCM_32 / FLOAT / DOUBLE
+        for n in (8, 16, 24, 32, 64):
+            if f"_{n}" in s or s.endswith(str(n)):
+                return n
+        if "FLOAT" in s:
+            return 32
+        if "DOUBLE" in s:
+            return 64
+        return None
+
+    def _build_audio_tooltip(self, path: str) -> str:
+        """构建悬停提示文本（更可读，替代终端的 ffmpeg dump）。"""
+        if not path:
+            return ""
+        try:
+            base = os.path.basename(path)
+        except Exception:
+            base = path
+
+        info = None
+        try:
+            info = sf.info(path)
+        except Exception:
+            info = None
+
+        lines: list[str] = []
+        lines.append(f"文件：{base}")
+
+        created = self._format_datetime_from_mtime(path)
+        if created:
+            lines.append(f"生成时间：{created}")
+
+        if info is not None:
+            try:
+                dur_s = float(getattr(info, "duration", 0.0) or 0.0)
+            except Exception:
+                dur_s = 0.0
+
+            try:
+                sr = int(getattr(info, "samplerate", 0) or 0)
+            except Exception:
+                sr = 0
+
+            try:
+                ch = int(getattr(info, "channels", 0) or 0)
+            except Exception:
+                ch = 0
+
+            subtype = str(getattr(info, "subtype", "") or "")
+            fmt = str(getattr(info, "format", "") or "")
+            bit_depth = self._guess_bit_depth_from_subtype(subtype)
+
+            if dur_s > 0:
+                lines.append(f"时长：{dur_s:.2f}s")
+            if sr > 0:
+                lines.append(f"采样率：{sr} Hz")
+            if ch > 0:
+                lines.append(f"声道：{ch}")
+            if bit_depth is not None:
+                lines.append(f"位深：{bit_depth}-bit")
+            if subtype or fmt:
+                codec_text = subtype if subtype else fmt
+                lines.append(f"格式：{codec_text}")
+
+            # PCM 类 wav 码率可由采样率*声道*位深估算（kb/s）
+            try:
+                if sr > 0 and ch > 0 and bit_depth is not None and bit_depth > 0:
+                    kbps = int(round((sr * ch * bit_depth) / 1000.0))
+                    lines.append(f"码率：{kbps} kb/s")
+            except Exception:
+                pass
+
+        # 最后一行给路径，方便定位
+        lines.append(f"路径：{path}")
+        return "\n".join(lines)
+
+    def _apply_tooltip(self, text: str):
+        if not text:
+            return
+        try:
+            self.setToolTip(text)
+        except Exception:
+            pass
+        # 常用可悬停区域也同步一份，提升可发现性
+        for w in (getattr(self, "title_label", None), getattr(self, "waveform", None), getattr(self, "play_btn", None)):
+            if w is None:
+                continue
+            try:
+                w.setToolTip(text)
+            except Exception:
+                pass
+
+    def _apply_duration_from_file(self, path: str):
+        """在不触发 QMediaPlayer 探测的前提下设置总时长。"""
+        try:
+            info = sf.info(path)
+            dur_s = float(getattr(info, "duration", 0.0) or 0.0)
+            dur_ms = int(max(0.0, dur_s) * 1000)
+        except Exception:
+            dur_ms = 0
+
+        if dur_ms <= 0:
+            return
+
+        try:
+            self._duration = dur_ms
+        except Exception:
+            pass
+        try:
+            self.total_time_label.setText(self._format_time(dur_ms))
+        except Exception:
+            pass
+        try:
+            self.waveform.set_duration_ms(dur_ms)
+        except Exception:
+            pass
+
+    def _ensure_player_source(self) -> bool:
+        """仅在需要播放时才 setSource，避免列表渲染阶段批量触发底层探测输出。"""
+        path = str(getattr(self, "_audio_path", "") or "")
+        if not path or not os.path.exists(path):
+            return False
+        if getattr(self, "_player_source_path", "") == path:
+            return True
+        try:
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self._player_source_path = path
+            return True
+        except Exception:
+            return False
         
     def _init_ui(self, title_text):
         if self._compact_mode:
@@ -489,9 +634,25 @@ class AudioPlayerWidget(CardWidget):
     def set_audio_path(self, path):
         """设置音频文件路径"""
         self._audio_path = path or ""
+        # 切换文件时重置懒加载状态
+        try:
+            self._player_source_path = ""
+        except Exception:
+            pass
+
+        # 若之前在播放其它音频，先停止（避免切换资源时状态混乱）
+        try:
+            self.player.stop()
+        except Exception:
+            pass
 
         # 空状态：未选择/文件不存在
         if not path or not os.path.exists(path):
+            # 释放媒体源，避免 Windows 下文件句柄占用导致无法删除/改名
+            try:
+                self.release_media()
+            except Exception:
+                pass
             if getattr(self, "_compact_mode", False):
                 self._set_empty_state(True)
             # 不要 disable 整个组件，否则无法点击上传
@@ -509,11 +670,26 @@ class AudioPlayerWidget(CardWidget):
                 self.player.stop()
             except Exception:
                 pass
+            # 清空 tooltip
+            try:
+                self.setToolTip("")
+            except Exception:
+                pass
             return
 
         # 已选择：加载波形并切回播放视图
         try:
             self.waveform.load_audio(path)
+        except Exception:
+            pass
+
+        # 读取音频元信息：用于 tooltip + 在不触发 QMediaPlayer 的情况下设置总时长
+        try:
+            self._apply_duration_from_file(path)
+        except Exception:
+            pass
+        try:
+            self._apply_tooltip(self._build_audio_tooltip(path))
         except Exception:
             pass
         if getattr(self, "_compact_mode", False):
@@ -531,8 +707,28 @@ class AudioPlayerWidget(CardWidget):
             except Exception:
                 pass
 
-        self.player.setSource(QUrl.fromLocalFile(path))
+        # 不在这里 setSource：避免历史记录一次性创建很多控件时，底层对每个文件探测并向终端输出
         self.setEnabled(True)
+
+    def release_media(self):
+        """停止播放并清空 QMediaPlayer 的 source，释放文件句柄（Windows 改名/删除需要）。"""
+        try:
+            if hasattr(self, "player") and self.player is not None:
+                try:
+                    self.player.stop()
+                except Exception:
+                    pass
+                try:
+                    from PySide6.QtCore import QUrl
+
+                    self.player.setSource(QUrl())
+                except Exception:
+                    pass
+        finally:
+            try:
+                self._player_source_path = ""
+            except Exception:
+                pass
 
     def add_tool_button(self, icon, tooltip, callback):
         """在右上角添加工具按钮"""
@@ -602,6 +798,9 @@ class AudioPlayerWidget(CardWidget):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
+            # 懒加载媒体源：仅在用户主动播放时才打开音频
+            if not self._ensure_player_source():
+                return
             self.player.play()
 
     def _on_position_changed(self, position):
@@ -758,13 +957,14 @@ class ReferenceAudioPlayerWidget(AudioPlayerWidget):
 class ResultAudioPlayerWidget(AudioPlayerWidget):
     """生成结果播放器：紧凑 + 不显示导入空态 + 无清空按钮。"""
 
-    def __init__(self, title="样本", parent=None):
+    def __init__(self, title="音频", parent=None):
         super().__init__(
             title,
             parent,
             compact_mode=True,
             compact_empty_hint="none",
             show_clear_button=False,
-            title_follows_filename=False,
+            # 输出样本希望展示全局 wav 文件名
+            title_follows_filename=True,
         )
 

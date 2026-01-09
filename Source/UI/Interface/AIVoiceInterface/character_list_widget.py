@@ -9,6 +9,7 @@
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QGridLayout
@@ -79,6 +80,18 @@ class CharacterListWidget(CardWidget):
         
         self._count_label = CaptionLabel("", header)
         header_layout.addWidget(self._count_label)
+
+        self._current_character_label = CaptionLabel("", header)
+        try:
+            self._current_character_label.setToolTip("")
+        except Exception:
+            pass
+        try:
+            # 角色名过长时避免把标题栏撑爆
+            self._current_character_label.setMaximumWidth(260)
+        except Exception:
+            pass
+        header_layout.addWidget(self._current_character_label)
         
         header_layout.addStretch()
         
@@ -133,6 +146,14 @@ class CharacterListWidget(CardWidget):
         
         # 更新数量
         self._count_label.setText(f"{len(characters)}/{self._character_manager.MAX_CHARACTERS}")
+
+        # 更新当前角色显示
+        try:
+            selected = self._character_manager.selected_character
+            name = selected.name if selected is not None else "未选择"
+            self._set_current_character_text(name)
+        except Exception:
+            self._set_current_character_text("未选择")
         
         # 添加"添加角色"按钮
         add_btn = AddCharacterButton(self._content_widget)
@@ -167,6 +188,30 @@ class CharacterListWidget(CardWidget):
         """更新选中状态"""
         for cid, btn in self._character_buttons.items():
             btn.set_selected(cid == selected_id)
+
+        try:
+            selected = self._character_manager.selected_character
+            name = selected.name if selected is not None else "未选择"
+            self._set_current_character_text(name)
+        except Exception:
+            self._set_current_character_text("未选择")
+
+    def _set_current_character_text(self, name: str):
+        """设置标题栏右侧的当前角色文字（带省略与 tooltip）。"""
+        base = f"当前角色：{name or ''}"
+        try:
+            fm = QFontMetrics(self._current_character_label.font())
+            elided = fm.elidedText(base, Qt.TextElideMode.ElideRight, int(self._current_character_label.maximumWidth()))
+        except Exception:
+            elided = base
+        try:
+            self._current_character_label.setText(elided)
+        except Exception:
+            pass
+        try:
+            self._current_character_label.setToolTip(base)
+        except Exception:
+            pass
     
     def set_expanded(self, expanded: bool):
         """兼容旧接口：展开功能已移除"""

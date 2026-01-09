@@ -73,16 +73,19 @@ class MainWindow(MSFluentWindow):
         self._changelog_window: Optional[ChangelogWindow] = None
         self._last_interface_index: int | None = None
         self._ai_voice_welcome_request_id: int = 0
+        self._ai_voice_welcome_shown_runtime: bool = False
         self.show_changelog()
 
-    def _show_ai_voice_welcome_if_still_current(self, request_id: int, force_every_time: bool = False):
+    def _show_ai_voice_welcome_if_still_current(self, request_id: int):
         """仅当计时结束时仍停留在 AI语音 页时才显示欢迎弹窗。"""
         try:
             if request_id != self._ai_voice_welcome_request_id:
                 return
             if self.stackedWidget.currentWidget() != self.ai_voice_interface:
                 return
-            self.ai_voice_interface.show_first_time_welcome_from_project(force_every_time=force_every_time)
+            shown = bool(self.ai_voice_interface.show_first_time_welcome_from_project())
+            if shown:
+                self._ai_voice_welcome_shown_runtime = True
         except Exception:
             pass
 
@@ -151,19 +154,20 @@ class MainWindow(MSFluentWindow):
         if index == self.stackedWidget.indexOf(self.ai_voice_interface):
             self.ai_voice_interface.refresh()
 
-            # 首次从“项目”进入“AI语音”时：延迟 0.5s 弹非模态欢迎弹窗
+            # 开发欢迎弹窗：force=true 时，每次应用启动进入 AI语音 延迟 0.5s 弹一次
             try:
-                force_every_time = False
+                force_enabled = False
                 try:
-                    force_every_time = bool(dev_config_utility.force_ai_voice_welcome_every_time())
+                    force_enabled = bool(dev_config_utility.force_ai_voice_welcome_every_time())
                 except Exception:
-                    force_every_time = False
+                    force_enabled = False
 
-                if force_every_time or (prev == self.stackedWidget.indexOf(self.project_interface)):
+                # force=true 时，每次应用启动仅弹一次（不是每次切页都弹）
+                if force_enabled and (not self._ai_voice_welcome_shown_runtime):
                     request_id = self._ai_voice_welcome_request_id
                     QTimer.singleShot(
                         500,
-                        lambda rid=request_id, force=force_every_time: self._show_ai_voice_welcome_if_still_current(rid, force),
+                        lambda rid=request_id: self._show_ai_voice_welcome_if_still_current(rid),
                     )
             except Exception:
                 pass
