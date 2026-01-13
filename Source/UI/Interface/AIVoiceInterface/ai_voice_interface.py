@@ -518,6 +518,7 @@ class IndexTTSPreflightDialog(MessageBoxBase):
             close_btn = PushButton("关闭", btn_grid_host)
             close_btn.setMinimumWidth(180)
             close_btn.setMinimumHeight(34)
+
             grid.addWidget(close_btn, 0, 0)
 
             def _close():
@@ -542,6 +543,147 @@ class IndexTTSPreflightDialog(MessageBoxBase):
             self.widget.setMinimumWidth(max(680, w))
         except Exception:
             self.widget.setMinimumWidth(760)
+
+
+class LocalModelActionsDialog(MessageBoxBase):
+    """“使用本地模型”弹窗：包含“下载依赖和模型 / 加载模型”两个按钮。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # 顶部栏：标题 + 右上角关闭（×）
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        title = BodyLabel("本地模型（IndexTTS2）", header)
+        header_layout.addWidget(title, 0)
+        header_layout.addStretch(1)
+
+        try:
+            close_icon = getattr(FluentIcon, "CLOSE")
+        except Exception:
+            close_icon = None
+        try:
+            close_btn = TransparentToolButton(close_icon or FluentIcon.CLOSE, header)
+        except Exception:
+            close_btn = TransparentToolButton(FluentIcon.DOCUMENT, header)
+        close_btn.setToolTip("关闭")
+        close_btn.setFixedSize(32, 32)
+        close_btn.clicked.connect(self.reject)
+        header_layout.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        self.viewLayout.addWidget(header)
+
+        content = BodyLabel(
+            "首次使用请先下载依赖和模型,下载完成后再加载模型到显存。\n"
+            "若显存较小（例如 8GB），建议启用 FP16（半精度）模式以节省显存。",
+            self,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+        
+        # FP16（半精度）开关：由外部（AIVoiceInterface）根据机器配置智能决定默认值
+        fp16_row = QWidget(self)
+        fp16_layout = QHBoxLayout(fp16_row)
+        fp16_layout.setContentsMargins(0, 0, 0, 0)
+        fp16_layout.setSpacing(10)
+        
+        try:
+            # 使用 qfluentwidgets 的 SwitchButton（更美观）
+            from qfluentwidgets import SwitchButton
+
+            self.fp16_checkbox = SwitchButton(fp16_row)
+            try:
+                self.fp16_checkbox.setOnText("FP16")
+                self.fp16_checkbox.setOffText("FP16")
+            except Exception:
+                pass
+            self.fp16_checkbox.setToolTip("FP16 通常更快、更省显存，质量损失很小。显存较小（例如 8GB）建议开启。")
+        except Exception:
+            self.fp16_checkbox = None
+        
+        self.fp16_hint_label = BodyLabel("", fp16_row)
+        self.fp16_hint_label.setWordWrap(True)
+        try:
+            self.fp16_hint_label.setStyleSheet("color: #666666;")
+        except Exception:
+            pass
+        
+        if self.fp16_checkbox is not None:
+            fp16_layout.addWidget(self.fp16_checkbox, 0)
+        fp16_layout.addWidget(self.fp16_hint_label, 1)
+        self.viewLayout.addWidget(fp16_row)
+
+        # 清空默认按钮
+        try:
+            self.buttonLayout.removeWidget(self.yesButton)
+            self.buttonLayout.removeWidget(self.cancelButton)
+            self.yesButton.hide()
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        btn_grid_host = QWidget(self.buttonGroup)
+        grid = QGridLayout(btn_grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        self.download_btn = PushButton(FluentIcon.DOWNLOAD, "下载依赖和模型", btn_grid_host)
+        self.load_model_btn = PushButton(FluentIcon.PLAY, "加载模型", btn_grid_host)
+
+        for b in (self.download_btn, self.load_model_btn):
+            b.setMinimumHeight(34)
+            b.setMinimumWidth(180)
+
+        grid.addWidget(self.download_btn, 0, 0)
+        grid.addWidget(self.load_model_btn, 0, 1)
+
+        try:
+            self.buttonGroup.setFixedHeight(24 + 34 + 12 + 34 + 24)
+        except Exception:
+            pass
+
+        self.buttonLayout.addWidget(btn_grid_host, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        try:
+            self.widget.setMinimumWidth(660)
+        except Exception:
+            pass
+
+
+class OnlineModelDialog(MessageBoxBase):
+    """“使用线上模型”弹窗（占位）：后续接入 API 管理与模型选择逻辑。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        title = BodyLabel("线上模型", self)
+        self.viewLayout.addWidget(title)
+
+        content = BodyLabel(
+            "这里将用于：\n"
+            "- 管理第三方 TTS API（Key/Token/区域等）\n"
+            "- 选择/绑定对应的线上模型（音色/声音复刻）\n\n"
+            "该弹窗内部逻辑稍后实现。",
+            self,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(content)
+
+        # 仅保留一个关闭按钮
+        try:
+            self.yesButton.setText("关闭")
+            self.cancelButton.hide()
+        except Exception:
+            pass
+
+        try:
+            self.widget.setMinimumWidth(620)
+        except Exception:
+            pass
 
 
 class AIVoiceWelcomeDialog(MessageBoxBase):
@@ -914,7 +1056,7 @@ class AIVoiceInterface(QFrame):
     """AI 语音界面（IndexTTS2 版）v2.1
     
     新布局：
-    - 顶部：标题 + 模型控制按钮
+    - 顶部：标题 + 模型选择按钮
     - 角色列表卡片（可展开/收起，网格布局）
     - 中部：三栏布局（音色参考 | 合成文本 | 生成结果）
     - 底部：情感控制
@@ -1083,7 +1225,7 @@ class AIVoiceInterface(QFrame):
         main_layout.setContentsMargins(20, 12, 20, 12)
         main_layout.setSpacing(12)
 
-        # ========== 顶部：角色列表 + 模型控制 ==========
+        # ========== 顶部：角色列表 + 模型选择 ==========
         self._create_top_section(main_layout)
 
         # ========== 中部三栏布局 ==========
@@ -1096,7 +1238,7 @@ class AIVoiceInterface(QFrame):
         main_layout.addStretch()
     
     def _create_top_section(self, parent_layout: QVBoxLayout):
-        """创建顶部区域（角色列表 + 模型控制）"""
+        """创建顶部区域（角色列表 + 模型选择）"""
         top_widget = QWidget(self)
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -1112,20 +1254,20 @@ class AIVoiceInterface(QFrame):
         self.character_list_widget.add_character_requested.connect(self._on_add_character)
         top_layout.addWidget(self.character_list_widget, 2)  # stretch factor 2
         
-        # === 右侧：模型控制面板（占 1/3 宽度）===
+        # === 右侧：模型选择面板（占 1/3 宽度）===
         self._create_model_control_panel(top_layout)
         
         parent_layout.addWidget(top_widget)
     
     def _create_model_control_panel(self, parent_layout: QHBoxLayout):
-        """创建模型控制面板"""
+        """创建模型选择面板"""
         from PySide6.QtWidgets import QGraphicsDropShadowEffect
         from PySide6.QtGui import QColor
         from PySide6.QtCore import QSize
         
         # 使用 CardWidget 包装
         panel = CardWidget(self)
-        # 供 TeachingTip/spotlight 锚定“模型控制”整个区域（而非单按钮）
+        # 供 TeachingTip/spotlight 锚定“模型选择”整个区域（而非单按钮）
         self.model_control_panel_card = panel
         
         # 移除手动设置的阴影和背景色，使用 CardWidget 的默认主题样式
@@ -1136,7 +1278,7 @@ class AIVoiceInterface(QFrame):
         panel_layout.setSpacing(12)
         
         # 标题（模型加载后可点击查看诊断信息）
-        self.model_control_title_btn = PushButton("模型控制", panel)
+        self.model_control_title_btn = PushButton("模型选择", panel)
         self.model_control_title_btn.setEnabled(False)
         self.model_control_title_btn.setToolTip("")
         self.model_control_title_btn.setStyleSheet(
@@ -1230,21 +1372,34 @@ class AIVoiceInterface(QFrame):
             }
         """
 
-        # 下载/删除依赖和模型按钮
-        self.download_btn = PushButton(FluentIcon.DOWNLOAD, "下载依赖和模型", panel)
-        self.download_btn.setMinimumHeight(40)
-        self.download_btn.setIconSize(self._model_btn_icon_size)
-        self.download_btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
-        self.download_btn.setStyleSheet(self._download_btn_style_download)
-        panel_layout.addWidget(self.download_btn)
+        # 面板入口按钮：使用本地 / 使用线上
+        try:
+            local_icon = getattr(FluentIcon, "COMPUTER", None) or FluentIcon.DOWNLOAD
+        except Exception:
+            local_icon = FluentIcon.DOWNLOAD
+        try:
+            online_icon = getattr(FluentIcon, "CLOUD", None) or getattr(FluentIcon, "GLOBE", None) or FluentIcon.DOCUMENT
+        except Exception:
+            online_icon = FluentIcon.DOCUMENT
 
-        # 加载/卸载模型按钮
-        self.load_model_btn = PushButton(FluentIcon.PLAY, "加载模型", panel)
-        self.load_model_btn.setMinimumHeight(40)
-        self.load_model_btn.setIconSize(self._model_btn_icon_size)
-        self.load_model_btn.setToolTip("加载模型到显存（首次约需 20-30 秒）")
-        self.load_model_btn.setStyleSheet(self._load_btn_style)
-        panel_layout.addWidget(self.load_model_btn)
+        self.use_local_model_btn = PushButton(local_icon, "使用本地模型", panel)
+        self.use_local_model_btn.setMinimumHeight(40)
+        self.use_local_model_btn.setIconSize(self._model_btn_icon_size)
+        self.use_local_model_btn.setToolTip("打开本地 IndexTTS2 模型管理（下载/加载）")
+        self.use_local_model_btn.setStyleSheet(self._download_btn_style_download)
+        panel_layout.addWidget(self.use_local_model_btn)
+
+        self.use_online_model_btn = PushButton(online_icon, "使用线上模型", panel)
+        self.use_online_model_btn.setMinimumHeight(40)
+        self.use_online_model_btn.setIconSize(self._model_btn_icon_size)
+        self.use_online_model_btn.setToolTip("打开线上 API 管理与模型选择")
+        self.use_online_model_btn.setStyleSheet(self._load_btn_style)
+        panel_layout.addWidget(self.use_online_model_btn)
+
+        # 本地模型弹窗懒创建：避免启动阶段构造 MessageBoxBase 引发“启动即弹窗”
+        self._local_model_dialog = None
+        self.download_btn = None
+        self.load_model_btn = None
         
         panel_layout.addStretch()
         
@@ -1464,13 +1619,10 @@ class AIVoiceInterface(QFrame):
                 cur = -1
 
             if empty:
-                if cur == 0:
-                    return
-                self._output_stack.setCurrentIndex(0)
-                return
-
-            # non-empty
-            if cur == 1:
+                try:
+                    self._output_stack.setCurrentIndex(0)
+                except Exception:
+                    pass
                 return
             self._output_stack.setCurrentIndex(1)
             # 非空态会显著增加内容高度：主动让主窗口增高，避免控件被挤压造成“视觉重叠”
@@ -1726,9 +1878,17 @@ class AIVoiceInterface(QFrame):
 
     def _connect_signals(self):
         """连接信号槽"""
-        # 模型控制
-        self.download_btn.clicked.connect(self._on_download_clicked)
-        self.load_model_btn.clicked.connect(self._on_load_model_clicked)
+        # 模型控制（面板入口）
+        try:
+            self.use_local_model_btn.clicked.connect(self._on_use_local_model_clicked)
+        except Exception:
+            pass
+        try:
+            self.use_online_model_btn.clicked.connect(self._on_use_online_model_clicked)
+        except Exception:
+            pass
+
+        # 本地模型弹窗内按钮：在弹窗创建时再绑定（避免此时按钮尚未创建）
 
         # 参考音频 (已在创建组件时连接)
         # self.import_audio_btn.clicked.connect(self._on_import_audio)
@@ -1770,6 +1930,96 @@ class AIVoiceInterface(QFrame):
         # IndexTTSDownloadJob 信号
         self._main_window.indextts_download_job.job_completed.connect(self._on_download_job_completed)
 
+    def _ensure_local_model_dialog(self) -> LocalModelActionsDialog | None:
+        """确保本地模型弹窗已创建，并绑定按钮槽函数。"""
+        dlg = getattr(self, "_local_model_dialog", None)
+        if dlg is not None:
+            return dlg
+        try:
+            dlg = LocalModelActionsDialog(self._main_window)
+            self._local_model_dialog = dlg
+            self.download_btn = dlg.download_btn
+            self.load_model_btn = dlg.load_model_btn
+            
+            # FP16 开关引用（可能不存在，需判空）
+            self.fp16_checkbox = getattr(dlg, "fp16_checkbox", None)
+            self.fp16_hint_label = getattr(dlg, "fp16_hint_label", None)
+
+            # 统一样式保持一致
+            try:
+                self.download_btn.setMinimumHeight(40)
+                self.download_btn.setIconSize(self._model_btn_icon_size)
+                self.download_btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
+                self.download_btn.setStyleSheet(self._download_btn_style_download)
+            except Exception:
+                pass
+            try:
+                self.load_model_btn.setMinimumHeight(40)
+                self.load_model_btn.setIconSize(self._model_btn_icon_size)
+                self.load_model_btn.setToolTip("加载模型到显存（首次约需 20-30 秒）")
+                self.load_model_btn.setStyleSheet(self._load_btn_style)
+            except Exception:
+                pass
+
+            # 绑定按钮槽（避免重复连接）
+            try:
+                from PySide6.QtCore import Qt
+
+                self.download_btn.clicked.connect(self._on_download_clicked, Qt.ConnectionType.UniqueConnection)
+                self.load_model_btn.clicked.connect(self._on_load_model_clicked, Qt.ConnectionType.UniqueConnection)
+            except Exception:
+                try:
+                    self.download_btn.clicked.connect(self._on_download_clicked)
+                except Exception:
+                    pass
+                try:
+                    self.load_model_btn.clicked.connect(self._on_load_model_clicked)
+                except Exception:
+                    pass
+
+            # 绑定 FP16 开关：仅当用户手动切换时才写入持久化配置
+            try:
+                if self.fp16_checkbox is not None:
+                    def _on_fp16_toggled(checked: bool):
+                        try:
+                            config_utility.set_config("AIVoice.IndexTTS2.UseFP16", bool(checked))
+                        except Exception:
+                            pass
+                        try:
+                            self._refresh_fp16_hint_text()
+                        except Exception:
+                            pass
+
+                    # SwitchButton 使用 checkedChanged；部分控件也可能是 toggled
+                    try:
+                        self.fp16_checkbox.checkedChanged.connect(_on_fp16_toggled)
+                    except Exception:
+                        self.fp16_checkbox.toggled.connect(_on_fp16_toggled)
+            except Exception:
+                pass
+
+            # 初始化 FP16 默认值与提示文案
+            try:
+                self._apply_fp16_default(auto_only=True)
+            except Exception:
+                pass
+
+            # 创建完成后，用当前快照刷新一次按钮显示（避免仍停留在默认样式/文案）
+            try:
+                self._update_download_btn_state(
+                    bool(getattr(self, "_env_ok_fast", False)),
+                    bool(getattr(self, "_model_files_ok", False)),
+                )
+            except Exception:
+                pass
+            try:
+                self._update_model_status()
+            except Exception:
+                pass
+            return dlg
+        except Exception:
+            return None
+
     # ==================== 角色管理 ====================
     def _is_character_name_unique(self, name: str, *, exclude_id: str | None = None) -> bool:
         try:
@@ -1804,6 +2054,89 @@ class AIVoiceInterface(QFrame):
             except Exception:
                 continue
         return True
+        
+    def _recommend_fp16(self) -> tuple[bool, str]:
+        """根据主机配置智能推荐 FP16 开关。"""
+        smi = {}
+        try:
+            smi = self._run_nvidia_smi() or {}
+        except Exception:
+            smi = {}
+        
+        def _to_int(x):
+            try:
+                return int(float(str(x).strip()))
+            except Exception:
+                return None
+        
+        total_mb = _to_int(smi.get("mem_total_mb"))
+        free_mb = _to_int(smi.get("mem_free_mb"))
+        gpu_name = str(smi.get("gpu_name") or "").strip()
+        
+        # 无法识别 GPU：保守默认关闭，但提示用户按需开启
+        if not total_mb:
+            return False, "未检测到 NVIDIA 显卡信息：默认关闭。若加载失败/显存不足，可开启 FP16。"
+        
+        total_gb = total_mb / 1024.0
+        free_gb = (free_mb / 1024.0) if free_mb is not None else None
+        
+        # 经验阈值：
+        # - 8GB 及以下：强烈建议 FP16
+        # - 12GB：通常建议 FP16（尤其是空闲不足时）
+        # - 16GB+：可默认关闭
+        if total_mb <= 8192:
+            reason = f"检测到 GPU {gpu_name or ''} 显存约 {total_gb:.1f}GB：建议开启 FP16 以降低显存占用。"
+            if free_gb is not None:
+                reason += f" 当前空闲约 {free_gb:.1f}GB。"
+            return True, reason
+        
+        if total_mb <= 12288:
+            if free_mb is not None and free_mb < 9000:
+                return True, f"检测到显存约 {total_gb:.1f}GB（空闲偏紧约 {free_gb:.1f}GB）：建议开启 FP16。"
+            return True, f"检测到显存约 {total_gb:.1f}GB：开启 FP16 通常更稳、更省显存。"
+        
+        # 16GB 及以上
+        if free_mb is not None and free_mb < 12000:
+            return True, f"虽然总显存约 {total_gb:.1f}GB，但当前空闲仅约 {free_gb:.1f}GB：建议开启 FP16。"
+        return False, f"检测到显存约 {total_gb:.1f}GB：默认关闭 FP16（需要更省显存时可开启）。"
+    
+    def _refresh_fp16_hint_text(self) -> None:
+        lbl = getattr(self, "fp16_hint_label", None)
+        if lbl is None:
+            return
+        
+        saved = self._get_fp16_saved_preference()
+        rec, reason = self._recommend_fp16()
+        if saved is None:
+            lbl.setText(f"自动推荐：{'开启' if rec else '关闭'}。{reason}")
+        else:
+            lbl.setText(f"已按你的设置：{'开启' if saved else '关闭'}。{reason}")
+    
+    def _apply_fp16_default(self, *, auto_only: bool = True) -> None:
+        """将 FP16 默认值应用到弹窗开关。
+        
+        auto_only=True：仅当用户没有保存偏好时才自动设置。
+        """
+        cb = getattr(self, "fp16_checkbox", None)
+        if cb is None:
+            return
+        
+        saved = self._get_fp16_saved_preference()
+        if auto_only and (saved is not None):
+            # 用户有明确偏好：不自动覆盖
+            try:
+                cb.setChecked(bool(saved))
+            except Exception:
+                pass
+            self._refresh_fp16_hint_text()
+            return
+        
+        rec, _ = self._recommend_fp16()
+        try:
+            cb.setChecked(bool(rec) if saved is None else bool(saved))
+        except Exception:
+            pass
+        self._refresh_fp16_hint_text()
 
     def _on_add_character(self):
         """添加新角色"""
@@ -2091,7 +2424,7 @@ class AIVoiceInterface(QFrame):
         else:
             self.ref_player_widget.set_audio_path("")
 
-    # ==================== 模型控制 ====================
+    # ==================== 模型选择 ====================
 
     def _on_download_clicked(self):
         """下载或删除依赖和模型"""
@@ -2126,8 +2459,45 @@ class AIVoiceInterface(QFrame):
             self._show_delete_assets_dialog(save_dir)
             return
 
-        # 下载模式：先检查环境，再下载模型
-        self._start_async_env_check(save_dir)
+        # 下载模式：环境检测在“使用本地模型”打开时已触发；这里直接复用结果。
+        if getattr(self, "_env_check_pending", False):
+            InfoBar.info(
+                title="正在检测环境",
+                content="请稍候，环境检测完成后再继续",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2500,
+            )
+            return
+
+        last_ready = getattr(self, "_env_check_last_ready", None)
+        last_msg = str(getattr(self, "_env_check_last_msg", "") or "")
+
+        if last_ready is True:
+            self._download_model_files(save_dir)
+            return
+
+        if last_ready is False and last_msg:
+            dialog = EnvMissingInstallDialog(self._main_window, last_msg)
+            res = dialog.exec()
+            if res and dialog.choice == "install":
+                self._pending_save_dir = save_dir
+                try:
+                    from PySide6.QtCore import Qt
+
+                    self._main_window.indextts_env_job.job_completed.connect(
+                        self._on_env_job_finished, Qt.ConnectionType.UniqueConnection
+                    )
+                except Exception:
+                    try:
+                        self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
+                    except Exception:
+                        pass
+                self._main_window.indextts_env_job.install_action()
+            return
+
+        # 兜底：若还没有任何检测结果，则回退为交互式检测流程
+        self._start_async_env_check(save_dir, show_install_dialog_on_missing=True, on_ready="download")
 
     def _run_indextts_preflight_before_download(self, save_dir: str) -> bool:
         """IndexTTS2 下载前设备预检。
@@ -2218,8 +2588,20 @@ class AIVoiceInterface(QFrame):
 
         self._main_window.indextts_env_job.install_action()
 
-    def _start_async_env_check(self, save_dir: str):
-        """异步检查环境"""
+    def _start_async_env_check(
+        self,
+        save_dir: str,
+        *,
+        show_install_dialog_on_missing: bool = True,
+        on_ready: str = "download",
+    ):
+        """异步检查环境。
+
+        Args:
+            save_dir: 模型目录
+            show_install_dialog_on_missing: 环境缺失时是否弹出“下载依赖”对话框
+            on_ready: 环境就绪后的动作："download" 触发下载流程；"none" 仅更新状态
+        """
         if self._env_check_pending:
             return
 
@@ -2227,8 +2609,12 @@ class AIVoiceInterface(QFrame):
         self._env_check_request_id += 1
         request_id = self._env_check_request_id
 
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("正在检测环境...")
+        try:
+            if getattr(self, "download_btn", None) is not None:
+                self.download_btn.setEnabled(False)
+                self.download_btn.setText("正在检测环境...")
+        except Exception:
+            pass
 
         worker = EnvCheckWorker()
         # Keep a strong reference to avoid Python GC interrupting signal delivery.
@@ -2239,7 +2625,14 @@ class AIVoiceInterface(QFrame):
         self._env_check_worker = worker
 
         worker.signals.finished.connect(
-            lambda is_ready, msg: self._on_env_check_finished(request_id, is_ready, msg, save_dir)
+            lambda is_ready, msg: self._on_env_check_finished(
+                request_id,
+                is_ready,
+                msg,
+                save_dir,
+                show_install_dialog_on_missing=bool(show_install_dialog_on_missing),
+                on_ready=str(on_ready or "download"),
+            )
         )
         QThreadPool.globalInstance().start(worker)
 
@@ -2254,7 +2647,11 @@ class AIVoiceInterface(QFrame):
 
         self._env_check_pending = False
         self._env_check_worker = None
-        self.download_btn.setEnabled(True)
+        try:
+            if getattr(self, "download_btn", None) is not None:
+                self.download_btn.setEnabled(True)
+        except Exception:
+            pass
         self._check_env_and_model()
 
         InfoBar.warning(
@@ -2265,24 +2662,48 @@ class AIVoiceInterface(QFrame):
             duration=4500
         )
 
-    def _on_env_check_finished(self, request_id: int, is_ready: bool, msg: str, save_dir: str):
+    def _on_env_check_finished(
+        self,
+        request_id: int,
+        is_ready: bool,
+        msg: str,
+        save_dir: str,
+        *,
+        show_install_dialog_on_missing: bool = True,
+        on_ready: str = "download",
+    ):
         """环境检测完成回调"""
         if request_id != self._env_check_request_id:
             return
 
         self._env_check_pending = False
         self._env_check_worker = None
-        self.download_btn.setEnabled(True)
+        try:
+            if getattr(self, "download_btn", None) is not None:
+                self.download_btn.setEnabled(True)
+        except Exception:
+            pass
         # 检查当前状态（如果文件已存在，则更新为删除模式；否则保持下载模式）
         self._check_env_and_model()
+
+        # 缓存最近一次检测结果，供“下载依赖和模型”点击时复用
+        try:
+            self._env_check_last_ready = bool(is_ready)
+            self._env_check_last_msg = str(msg or "")
+        except Exception:
+            self._env_check_last_ready = bool(is_ready)
+            self._env_check_last_msg = ""
         
         if not is_ready:
+            if not bool(show_install_dialog_on_missing):
+                return
+
             # 提示安装环境（自定义布局，保证按钮不重叠；样式与“下载模型”窗口一致）
             dialog = EnvMissingInstallDialog(self._main_window, msg)
             res = dialog.exec()
             if res and dialog.choice == "install":
                 self._pending_save_dir = save_dir
-                
+
                 # 连接信号，等待环境安装完成
                 try:
                     from PySide6.QtCore import Qt
@@ -2295,13 +2716,19 @@ class AIVoiceInterface(QFrame):
                         self._main_window.indextts_env_job.job_completed.connect(self._on_env_job_finished)
                     except Exception:
                         pass
-                
+
                 # 启动环境安装
                 self._main_window.indextts_env_job.install_action()
             return
 
-        # 2. 环境已就绪，直接进入模型下载流程
-        self._download_model_files(save_dir)
+        # 环境已就绪
+        if str(on_ready).lower() == "download":
+            # 进入模型下载流程
+            self._download_model_files(save_dir)
+            return
+
+        # on_ready == none: 仅更新状态，不触发下载
+        return
 
     def _on_env_job_finished(self, success: bool):
         """环境安装完成回调"""
@@ -2506,38 +2933,44 @@ class AIVoiceInterface(QFrame):
         - !env_ok & model_ok: 缺乏依赖（仅环境缺失）-> 保持黄色样式，提供下载环境依赖入口
         - otherwise: 下载依赖和模型
         """
+        btn = getattr(self, "download_btn", None)
+
+        # 先更新内部状态（即使按钮尚未创建）
+        self._is_delete_mode = bool(env_ok and model_ok)
+
+        # 弹窗懒创建：界面 refresh() 可能先于弹窗按钮创建
+        if btn is None:
+            return
+
         # 1) 配置完成：允许删除
         if env_ok and model_ok:
-            self._is_delete_mode = True
-            self.download_btn.setText("配置完成，点击可删除")
+            btn.setText("配置完成，点击可删除")
             # 视觉保持与“加载完成，点击可卸载”一致：浅蓝 + 对勾
-            self.download_btn.setIcon(FluentIcon.ACCEPT)
-            self.download_btn.setToolTip("删除 IndexTTS2 的依赖和模型文件以释放磁盘空间")
+            btn.setIcon(FluentIcon.ACCEPT)
+            btn.setToolTip("删除 IndexTTS2 的依赖和模型文件以释放磁盘空间")
             if hasattr(self, "_model_btn_icon_size"):
-                self.download_btn.setIconSize(self._model_btn_icon_size)
-            self.download_btn.setStyleSheet(getattr(self, "_load_btn_style_unload", ""))
+                btn.setIconSize(self._model_btn_icon_size)
+            btn.setStyleSheet(getattr(self, "_load_btn_style_unload", ""))
             return
 
         # 2) 仅环境缺失：保持黄色样式，但引导下载环境依赖
         if (not env_ok) and model_ok:
-            self._is_delete_mode = False
-            self.download_btn.setText("缺乏依赖，点击可下载")
-            self.download_btn.setIcon(FluentIcon.DOWNLOAD)
-            self.download_btn.setToolTip("检测到环境依赖缺失，点击可下载/安装环境依赖")
+            btn.setText("缺乏依赖，点击可下载")
+            btn.setIcon(FluentIcon.DOWNLOAD)
+            btn.setToolTip("检测到环境依赖缺失，点击可下载/安装环境依赖")
             if hasattr(self, "_model_btn_icon_size"):
-                self.download_btn.setIconSize(self._model_btn_icon_size)
+                btn.setIconSize(self._model_btn_icon_size)
             # 复用当前“配置完成”黄色样式
-            self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_delete", ""))
+            btn.setStyleSheet(getattr(self, "_download_btn_style_delete", ""))
             return
 
         # 3) 其余情况：下载依赖和模型
-        self._is_delete_mode = False
-        self.download_btn.setText("下载依赖和模型")
-        self.download_btn.setIcon(FluentIcon.DOWNLOAD)
-        self.download_btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
+        btn.setText("下载依赖和模型")
+        btn.setIcon(FluentIcon.DOWNLOAD)
+        btn.setToolTip("下载 IndexTTS2 所需的依赖和模型文件（约 5GB）")
         if hasattr(self, "_model_btn_icon_size"):
-            self.download_btn.setIconSize(self._model_btn_icon_size)
-        self.download_btn.setStyleSheet(getattr(self, "_download_btn_style_download", ""))
+            btn.setIconSize(self._model_btn_icon_size)
+        btn.setStyleSheet(getattr(self, "_download_btn_style_download", ""))
 
     def _on_load_model_clicked(self):
         """加载/卸载模型"""
@@ -2582,15 +3015,86 @@ class AIVoiceInterface(QFrame):
                 )
                 return
 
+            # 读取 FP16 开关（若弹窗未创建则按智能推荐/持久化偏好）
+            use_fp16 = None
+            try:
+                cb = getattr(self, "fp16_checkbox", None)
+                if cb is not None:
+                    use_fp16 = bool(cb.isChecked())
+            except Exception:
+                use_fp16 = None
+            if use_fp16 is None:
+                saved = self._get_fp16_saved_preference()
+                if saved is None:
+                    use_fp16, _ = self._recommend_fp16()
+                else:
+                    use_fp16 = bool(saved)
+            
+            # 标记：本次为“模型加载”，用于失败提示/自动重试
+            try:
+                self._model_load_in_progress = True
+                self._model_load_last_fp16 = bool(use_fp16)
+            except Exception:
+                pass
+            
+            # 加载耗时提示：若过久仍未完成，给出优化建议（不打断）
+            try:
+                if not hasattr(self, "_model_load_watchdog") or self._model_load_watchdog is None:
+                    self._model_load_watchdog = QTimer(self)
+                    self._model_load_watchdog.setSingleShot(True)
+                    self._model_load_watchdog.timeout.connect(self._on_model_load_watchdog_timeout)
+                self._model_load_watchdog.start(90_000)
+            except Exception:
+                pass
+            
             job.load_model_action(
                 model_dir,
-                use_fp16=False,
+                use_fp16=bool(use_fp16),
                 use_cuda_kernel=False,
-                use_deepspeed=False
+                use_deepspeed=False,
             )
             
             self.load_model_btn.setEnabled(False)
             self.load_model_btn.setText("加载中...")
+
+            # 加载期间禁用 FP16 开关（避免用户误以为实时生效）
+            try:
+                if getattr(self, "fp16_checkbox", None) is not None:
+                    self.fp16_checkbox.setEnabled(False)
+            except Exception:
+                pass
+
+    def _on_model_load_watchdog_timeout(self):
+        """模型加载超过一定时间：提示可能需要 FP16/释放显存。"""
+        try:
+            if not bool(getattr(self, "_model_load_in_progress", False)):
+                return
+        except Exception:
+            return
+
+        try:
+            rec, reason = self._recommend_fp16()
+        except Exception:
+            rec, reason = (True, "")
+
+        msg = "模型加载时间较长。"
+        if bool(getattr(self, "_model_load_last_fp16", False)):
+            msg += "已启用 FP16，仍较慢时建议关闭占用显存的软件后重试。"
+        else:
+            msg += "可能是显存不足导致卡住，建议开启 FP16（半精度）后重试。"
+        if reason:
+            msg += f"\n{reason}"
+
+        try:
+            InfoBar.warning(
+                title="模型加载较慢",
+                content=msg,
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=7000,
+            )
+        except Exception:
+            pass
     
     def _check_env_ready_with_warning(self) -> bool:
         """检查环境是否就绪，如未就绪则显示警告
@@ -2640,12 +3144,17 @@ class AIVoiceInterface(QFrame):
     def _update_model_status(self):
         """更新模型状态显示"""
         job = self._main_window.indextts_job
+
+        btn = getattr(self, "load_model_btn", None)
+        title_btn = getattr(self, "model_control_title_btn", None)
         
         if job.is_model_loaded:
-            self.load_model_btn.setText("加载完成，点击可卸载")
-            self.load_model_btn.setIcon(FluentIcon.ACCEPT)
-            self.load_model_btn.setStyleSheet(self._load_btn_style_unload)
             self._model_ready = True
+
+            if btn is not None:
+                btn.setText("加载完成，点击可卸载")
+                btn.setIcon(FluentIcon.ACCEPT)
+                btn.setStyleSheet(self._load_btn_style_unload)
 
             # 标题切换为“使用中 + 设备信息”，并允许点击查看详情
             try:
@@ -2655,21 +3164,34 @@ class AIVoiceInterface(QFrame):
                 device = ""
 
             device_text = str(device).strip() if device else "未知"
-            self.model_control_title_btn.setText(f"模型正在使用中，使用设备：{device_text}")
-            self.model_control_title_btn.setEnabled(True)
-            self.model_control_title_btn.setToolTip("点击查看更详细的模型/显存信息")
+            if title_btn is not None:
+                title_btn.setText(f"正在使用本地模型，使用设备：{device_text}")
+                title_btn.setEnabled(True)
+                title_btn.setToolTip("点击查看更详细的模型/显存信息")
         else:
-            self.load_model_btn.setText("加载模型")
-            self.load_model_btn.setIcon(FluentIcon.PLAY)
-            self.load_model_btn.setStyleSheet(self._load_btn_style)
             self._model_ready = False
 
+            if btn is not None:
+                btn.setText("加载模型")
+                btn.setIcon(FluentIcon.PLAY)
+                btn.setStyleSheet(self._load_btn_style)
+
             # 未加载时恢复普通标题且不响应点击
-            self.model_control_title_btn.setText("模型控制")
-            self.model_control_title_btn.setEnabled(False)
-            self.model_control_title_btn.setToolTip("")
-        
-        self.load_model_btn.setEnabled(True)
+            if title_btn is not None:
+                title_btn.setText("模型选择")
+                title_btn.setEnabled(False)
+                title_btn.setToolTip("")
+
+        if btn is not None:
+            btn.setEnabled(True)
+
+        # FP16 开关：模型已加载时禁用（更改需要卸载后重新加载才生效）
+        try:
+            cb = getattr(self, "fp16_checkbox", None)
+            if cb is not None:
+                cb.setEnabled(not bool(job.is_model_loaded))
+        except Exception:
+            pass
         self._update_generate_btn_state()
 
     def _run_nvidia_smi(self) -> dict:
@@ -3140,6 +3662,86 @@ class AIVoiceInterface(QFrame):
     @Slot(bool)
     def _on_job_completed(self, success: bool):
         """任务完成回调"""
+        # 先处理“模型加载”路径：补齐失败提示/一键重试
+        is_model_load_flow = bool(getattr(self, "_model_load_in_progress", False)) and (not bool(getattr(self, "_synthesis_in_progress", False)))
+        if is_model_load_flow:
+            # 停止 watchdog
+            try:
+                if getattr(self, "_model_load_watchdog", None) is not None:
+                    self._model_load_watchdog.stop()
+            except Exception:
+                pass
+
+            # 清理标志
+            try:
+                self._model_load_in_progress = False
+            except Exception:
+                pass
+
+            # 先把 FP16 开关放开（若模型成功加载，_update_model_status 会再禁用）
+            try:
+                if getattr(self, "fp16_checkbox", None) is not None:
+                    self.fp16_checkbox.setEnabled(True)
+            except Exception:
+                pass
+
+            if not success:
+                last_fp16 = bool(getattr(self, "_model_load_last_fp16", False))
+
+                try:
+                    rec, reason = self._recommend_fp16()
+                except Exception:
+                    rec, reason = (True, "")
+
+                if not last_fp16:
+                    msg = (
+                        "模型加载失败，常见原因：显存不足（尤其 8GB）、驱动/环境异常或模型文件不完整。\n\n"
+                        "建议开启 FP16（半精度）降低显存占用后重试。"
+                    )
+                    if reason:
+                        msg += f"\n\n{reason}"
+
+                    ok = False
+                    try:
+                        box = MessageBox("模型加载失败", msg, self._main_window)
+                        self._tune_message_box(box)
+                        box.yesButton.setText("开启 FP16 并重试")
+                        box.cancelButton.setText("取消")
+                        ok = (box.exec() == 1)
+                    except Exception:
+                        ok = False
+
+                    if ok:
+                        try:
+                            if getattr(self, "fp16_checkbox", None) is not None:
+                                self.fp16_checkbox.setChecked(True)
+                        except Exception:
+                            pass
+                        try:
+                            self._on_load_model_clicked()
+                        except Exception:
+                            pass
+                else:
+                    hint = (
+                        "模型加载失败（已启用 FP16）。\n"
+                        "建议：\n"
+                        "- 关闭占用显存的软件（游戏/浏览器硬件加速等）\n"
+                        "- 更新 NVIDIA 驱动\n"
+                        "- 确认模型文件完整（必要时重新下载）"
+                    )
+                    if reason:
+                        hint += f"\n\n{reason}"
+                    try:
+                        InfoBar.error(
+                            title="模型加载失败",
+                            content=hint,
+                            parent=self,
+                            position=InfoBarPosition.TOP,
+                            duration=9000,
+                        )
+                    except Exception:
+                        pass
+
         self._update_model_status()
         self._update_generate_btn_state()
 
@@ -3239,7 +3841,11 @@ class AIVoiceInterface(QFrame):
         # 更新下载/删除按钮状态（若正在异步检测，不覆盖按钮文案/禁用状态）
         if not self._env_check_pending:
             self._update_download_btn_state(bool(env_ok), bool(model_ok))
-            self.download_btn.setEnabled(True)
+            try:
+                if getattr(self, "download_btn", None) is not None:
+                    self.download_btn.setEnabled(True)
+            except Exception:
+                pass
         self._env_ready = bool(env_ok and model_ok)
 
         # 更新模型状态
@@ -3529,11 +4135,11 @@ class AIVoiceInterface(QFrame):
     def _get_quick_guide_steps(self):
         return [
             (
-                "模型控制\n",
+                "模型选择\n",
                 "⬇️ 先点击“下载依赖和模型”完成准备，然后点击“加载模型”把模型加载到显存。"
                 "💡 只需下载一次，后续使用只需点击“加载模型”即可，关闭程序会自动卸载模型。",
                 lambda: getattr(self, "model_control_panel_card", None) or getattr(self, "download_btn", None),
-                # 期望放在“模型控制”区域下方；空间不足时会自动翻转
+                # 期望放在“模型选择”区域下方；空间不足时会自动翻转
                 TeachingTipTailPosition.TOP,
             ),
             (
@@ -3719,10 +4325,10 @@ class AIVoiceInterface(QFrame):
     def _run_quick_guide_step(self, step_index: int):
         steps = [
             (
-                "模型控制",
-                "先点击“下载依赖和模型”完成准备，然后点击“加载模型”把模型加载到显存。\n\n"
+                "模型选择",
+                "点击“使用本地模型”打开弹窗，然后在弹窗内完成“下载依赖和模型”和“加载模型”。\n\n"
                 "建议：首次使用请优先完成下载与加载，再进行生成。",
-                lambda: getattr(self, "download_btn", None),
+                lambda: getattr(self, "use_local_model_btn", None),
             ),
             (
                 "角色列表",
@@ -3799,4 +4405,50 @@ class AIVoiceInterface(QFrame):
         """Job 完成回调（由 MainWindow 调用）"""
         self._update_model_status()
         self._update_generate_btn_state()
+
+    def _on_use_local_model_clicked(self):
+        """打开“使用本地模型”弹窗，并在打开时触发一次环境检测（仅更新状态）。"""
+        try:
+            audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+            save_dir = os.path.join(audiobox_root, "checkpoints")
+            self._pending_save_dir = save_dir
+
+            dlg = self._ensure_local_model_dialog()
+            if dlg is None:
+                return
+
+            # 每次打开都刷新智能推荐文案/默认值（仅在用户未保存偏好时自动应用）
+            try:
+                self._apply_fp16_default(auto_only=True)
+            except Exception:
+                pass
+
+            # 先做一次快速检查，确保弹窗一打开按钮状态就正确
+            try:
+                self._check_env_and_model()
+            except Exception:
+                pass
+
+            # 触发一次完整依赖检查（不弹安装对话框、不自动下载）
+            try:
+                self._start_async_env_check(
+                    save_dir,
+                    show_install_dialog_on_missing=False,
+                    on_ready="none",
+                )
+            except Exception:
+                pass
+
+            dlg.exec()
+        except Exception:
+            pass
+
+    def _on_use_online_model_clicked(self):
+        """打开“使用线上模型”弹窗（占位，后续实现 API 管理/模型选择）。"""
+        try:
+            dlg = OnlineModelDialog(self._main_window)
+            dlg.exec()
+        except Exception:
+            pass
 
