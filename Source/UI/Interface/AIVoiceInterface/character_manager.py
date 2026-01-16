@@ -1,12 +1,14 @@
 """角色管理器
 
-负责角色数据的 CRUD 操作和 JSON 持久化。
+负责角色数据的 CRUD 操作和持久化。
 
 持久化策略：
-- 默认数据：config/characters.default.json（应提交到版本库，供其他人拉取）
-- 本地覆盖：config/characters.json（仅本地存在，应被 SVN 忽略）
+1. 有 project_id 时：使用 config_utility 存储到项目配置中
+2. 无 project_id 时（向后兼容）：
+   - 默认数据：config/characters.default.json（应提交到版本库，供其他人拉取）
+   - 本地覆盖：config/characters.json（仅本地存在，应被 SVN 忽略）
 
-运行逻辑：
+运行逻辑（无 project_id 时）：
 - 若存在本地覆盖文件，则只读取/写入本地覆盖文件。
 - 若仅存在默认文件，则读取默认文件；当发生会写入的数据变更（增删改/置顶等）时，自动生成本地覆盖文件并从此写入本地。
 """
@@ -16,6 +18,8 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional, List, Dict
+
+from Source.Utility.config_utility import config_utility
 
 
 @dataclass
@@ -63,30 +67,45 @@ class Character:
 
 class CharacterManager:
     """角色管理器"""
-    
+
     MAX_CHARACTERS = 20  # 最大角色数量
-    
-    def __init__(self, config_dir: Optional[str] = None):
+
+    def __init__(self, config_dir: Optional[str] = None, project_id: Optional[str] = None):
         """
         初始化角色管理器
-        
+
         Args:
-            config_dir: 配置文件目录，默认为项目根目录的 config 文件夹
+            config_dir: 配置文件目录，默认为项目根目录的 config 文件夹（仅在无 project_id 时使用）
+            project_id: 项目ID，有值时使用 config_utility 存储
         """
-        if config_dir is None:
-            # 默认使用项目根目录的 config 文件夹
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-            config_dir = os.path.join(project_root, "config")
-        
-        self._config_dir = config_dir
-        self._local_json_path = os.path.join(config_dir, "characters.json")
-        self._default_json_path = os.path.join(config_dir, "characters.default.json")
-        self._using_local_json = False
+        self._project_id = project_id
         self._characters: List[Character] = []
         self._selected_id: Optional[str] = None
-        
+
+        # 仅在无 project_id 时使用文件存储
+        if project_id is None:
+            if config_dir is None:
+                # 默认使用项目根目录的 config 文件夹
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+                config_dir = os.path.join(project_root, "config")
+
+            self._config_dir = config_dir
+            self._local_json_path = os.path.join(config_dir, "characters.json")
+            self._default_json_path = os.path.join(config_dir, "characters.default.json")
+            self._using_local_json = False
+        else:
+            self._config_dir = None
+            self._local_json_path = None
+            self._default_json_path = None
+            self._using_local_json = False
+
         self._load()
+
+    @staticmethod
+    def create_for_project(project_id: str) -> "CharacterManager":
+        """为指定项目创建角色管理器"""
+        return CharacterManager(project_id=project_id)
     
     @property
     def characters(self) -> List[Character]:
@@ -116,7 +135,38 @@ class CharacterManager:
         return len(self._characters) < self.MAX_CHARACTERS
     
     def _load(self):
-        """从 JSON 文件加载角色数据"""
+        """加载角色数据"""
+        if self._project_id:
+            # 从 config_utility 加载项目专属角色数据
+            self._load_from_config_utility()
+        else:
+            # 从 JSON 文件加载（向后兼容）
+            self._load_from_json_file()
+
+    def _load_from_config_utility(self):
+        """从 config_utility 加载角色数据"""
+        characters_data = config_utility.get_project_characters(self._project_id)
+        if not characters_data:
+            self._characters = []
+            self._selected_id = None
+            return
+
+        try:
+            self._characters = [
+                Character.from_dict(c) for c in characters_data.get("characters", [])
+            ]
+            self._selected_id = characters_data.get("selected_character_id")
+
+            # 验证选中的角色是否存在
+            if self._selected_id and not self.get_by_id(self._selected_id):
+                self._selected_id = None
+        except Exception as e:
+            print(f"[CharacterManager] 从配置加载角色数据失败: {e}")
+            self._characters = []
+            self._selected_id = None
+
+    def _load_from_json_file(self):
+        """从 JSON 文件加载角色数据（向后兼容）"""
         self._using_local_json = os.path.exists(self._local_json_path)
         json_path = self._local_json_path if self._using_local_json else self._default_json_path
 
@@ -124,20 +174,20 @@ class CharacterManager:
             self._characters = []
             self._selected_id = None
             return
-        
+
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             self._characters = [
                 Character.from_dict(c) for c in data.get("characters", [])
             ]
             self._selected_id = data.get("selected_character_id")
-            
+
             # 验证选中的角色是否存在
             if self._selected_id and not self.get_by_id(self._selected_id):
                 self._selected_id = None
-                
+
         except (json.JSONDecodeError, IOError) as e:
             print(f"[CharacterManager] 加载角色数据失败: {e}")
             self._characters = []
@@ -147,25 +197,45 @@ class CharacterManager:
         """确保后续写入使用本地覆盖文件。
 
         注意：本地覆盖文件不存在时，不会在初始化阶段创建；仅当发生会写入的数据变更时才创建。
+        仅在无 project_id 时使用。
         """
+        if self._project_id:
+            return
         if self._using_local_json:
             return
 
         # 标记切换为本地覆盖；实际内容由随后的 _save() 写入。
         self._using_local_json = True
-    
+
     def _save(self):
-        """保存角色数据到 JSON 文件"""
+        """保存角色数据"""
+        if self._project_id:
+            # 保存到 config_utility
+            self._save_to_config_utility()
+        else:
+            # 保存到 JSON 文件（向后兼容）
+            self._save_to_json_file()
+
+    def _save_to_config_utility(self):
+        """保存角色数据到 config_utility"""
+        characters_data = {
+            "characters": [c.to_dict() for c in self._characters],
+            "selected_character_id": self._selected_id
+        }
+        config_utility.set_project_characters(self._project_id, characters_data)
+
+    def _save_to_json_file(self):
+        """保存角色数据到 JSON 文件（向后兼容）"""
         os.makedirs(self._config_dir, exist_ok=True)
 
         # 永远只写入本地覆盖文件，避免改动默认文件。
         self._ensure_local_json_for_write()
-        
+
         data = {
             "characters": [c.to_dict() for c in self._characters],
             "selected_character_id": self._selected_id
         }
-        
+
         try:
             with open(self._local_json_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -260,19 +330,19 @@ class CharacterManager:
     def select(self, character_id: str) -> bool:
         """
         选中角色
-        
+
         Args:
             character_id: 角色 ID
-            
+
         Returns:
             是否选中成功
         """
         if not self.get_by_id(character_id):
             return False
-        
+
         self._selected_id = character_id
-        # 仅在本地覆盖模式下持久化选中状态；避免仅“点选”就生成本地文件。
-        if self._using_local_json:
+        # 有 project_id 时始终保存；无 project_id 时仅在本地覆盖模式下持久化选中状态
+        if self._project_id or self._using_local_json:
             self._save()
         return True
     

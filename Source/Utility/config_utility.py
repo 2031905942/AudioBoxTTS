@@ -12,6 +12,7 @@ class ProjectData:
     WWISE_PROJECT_PATH = "WwiseProjectPath"
     UNITY_WWISE_BANK_PATH = "UnityWwiseBankPath"
     LANGUAGE_CHECK_DICT = "LanguageCheckDict"
+    CHARACTERS = "Characters"
 
 
 class ConfigUtility:
@@ -51,6 +52,25 @@ class ConfigUtility:
             return language_check_dict
         else:
             return None
+
+    def get_project_characters(self, project_id: str) -> dict | None:
+        """获取项目的角色数据"""
+        project_data: dict = self.get_project_data(project_id)
+        if project_data:
+            return project_data.get(ProjectData.CHARACTERS)
+        return None
+
+    def set_project_characters(self, project_id: str, characters_data: dict) -> bool:
+        """设置项目的角色数据"""
+        if not project_id:
+            self._print_log_error("无法设置角色数据, 项目ID为空.")
+            return False
+        project_data: dict = self.get_project_data(project_id)
+        if not project_data:
+            self._print_log_error(f"无法设置角色数据, 项目ID\"{project_id}\"数据不存在.")
+            return False
+        self.config_data[ConfigUtility._PROJECT_DATA_DICT_CONFIG_NAME][project_id][ProjectData.CHARACTERS] = characters_data
+        return self._write_config_data()
 
     def add_project_data(self, project_id: str, project_title: str) -> bool:
         if not project_id:

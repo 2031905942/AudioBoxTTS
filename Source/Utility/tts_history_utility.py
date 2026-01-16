@@ -54,12 +54,33 @@ class TTSHistoryStore:
 
     INDEX_FILENAME = "history.jsonl"
 
-    def __init__(self, base_dir: Optional[str] = None):
-        self._base_dir = base_dir or os.path.join(os.getcwd(), "temp_output")
+    def __init__(self, base_dir: Optional[str] = None, project_id: Optional[str] = None):
+        """
+        初始化历史记录存储
+
+        Args:
+            base_dir: 基础目录，默认为 temp_output
+            project_id: 项目ID，有值时按项目隔离存储到 temp_output/{project_id}/
+        """
+        default_base = base_dir or os.path.join(os.getcwd(), "temp_output")
+        if project_id:
+            self._base_dir = os.path.join(default_base, project_id)
+        else:
+            self._base_dir = default_base
+        self._project_id = project_id
+
+    @staticmethod
+    def create_for_project(project_id: str, base_dir: Optional[str] = None) -> "TTSHistoryStore":
+        """为指定项目创建历史记录存储"""
+        return TTSHistoryStore(base_dir=base_dir, project_id=project_id)
 
     @property
     def base_dir(self) -> str:
         return self._base_dir
+
+    @property
+    def project_id(self) -> Optional[str]:
+        return self._project_id
 
     def get_character_dir(self, character_id: str, character_name: str) -> str:
         # New rule: folder name is only the (sanitized) nickname.

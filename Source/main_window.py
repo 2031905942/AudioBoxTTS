@@ -58,6 +58,16 @@ class MainWindow(MSFluentWindow):
 
         self.ai_voice_interface = AIVoiceInterface(self)
 
+        # 项目页 Tab 与 AI语音 页 Tab 同步
+        try:
+            self.project_interface.project_tab_added.connect(self.ai_voice_interface.on_project_tab_added)
+            self.project_interface.project_tab_removed.connect(self.ai_voice_interface.on_project_tab_removed)
+            self.project_interface.project_tab_renamed.connect(self.ai_voice_interface.on_project_tab_renamed)
+            self.project_interface.project_tab_switched.connect(self.ai_voice_interface.on_project_tab_switched)
+            self.project_interface.project_tabs_swapped.connect(self.ai_voice_interface.on_project_tabs_swapped)
+        except Exception:
+            pass
+
         self.title_bar: TitleBar = TitleBar(self)
         self.init_title_bar()
 
@@ -153,6 +163,14 @@ class MainWindow(MSFluentWindow):
 
         if index == self.stackedWidget.indexOf(self.ai_voice_interface):
             self.ai_voice_interface.refresh()
+
+            # 进入 AI语音 页时，确保 Tab 对齐当前项目
+            try:
+                pid = self.get_current_project_id()
+                if pid:
+                    self.ai_voice_interface.on_project_tab_switched(pid)
+            except Exception:
+                pass
 
             # 开发欢迎弹窗：force=true 时，每次应用启动进入 AI语音 延迟 0.5s 弹一次
             try:

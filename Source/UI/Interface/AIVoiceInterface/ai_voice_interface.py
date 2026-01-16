@@ -13,7 +13,7 @@ from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence, QAction
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QVBoxLayout, QWidget, QSizePolicy, QStackedLayout, QLabel, QDialog
+    QVBoxLayout, QWidget, QSizePolicy, QStackedLayout, QStackedWidget, QLabel, QDialog
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, InfoBar, InfoBarPosition,
@@ -21,7 +21,7 @@ from qfluentwidgets import (
     Slider, StrongBodyLabel, TitleLabel,
     ToolTipFilter, ToolTipPosition, TransparentToolButton,
     TeachingTip, TeachingTipTailPosition,
-    TextBrowser,
+    TextBrowser, TabCloseButtonDisplayMode,
 )
 
 from Source.Utility.indextts_preflight_utility import (
@@ -29,15 +29,16 @@ from Source.Utility.indextts_preflight_utility import (
 )
 
 from Source.Utility.indextts_utility import IndexTTSUtility
-from Source.Utility.config_utility import config_utility
+from Source.Utility.config_utility import config_utility, ProjectData
 from Source.Utility.dev_config_utility import dev_config_utility
 from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterManager, Character
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ReferenceAudioPlayerWidget, ResultAudioPlayerWidget
 from Source.UI.Interface.AIVoiceInterface.history_window import AIVoiceHistoryWindow
-from Source.Utility.tts_history_utility import tts_history_store
+from Source.Utility.tts_history_utility import tts_history_store, TTSHistoryStore
 from Source.UI.Basic.progress_bar_window import ProgressBarWindow
+from Source.UI.Basic.project_tab_bar import ProjectTabBar, ProjectTabItem
 
 
 class EnvCheckSignals(QObject):
@@ -1054,9 +1055,9 @@ class DeleteAssetsChoiceDialog(MessageBoxBase):
 
 class AIVoiceInterface(QFrame):
     """AI 语音界面（IndexTTS2 版）v2.1
-    
+
     新布局：
-    - 顶部：标题 + 模型选择按钮
+    - 顶部：TabBar（与项目页面同步）
     - 角色列表卡片（可展开/收起，网格布局）
     - 中部：三栏布局（音色参考 | 合成文本 | 生成结果）
     - 底部：情感控制
@@ -1080,8 +1081,21 @@ class AIVoiceInterface(QFrame):
         except Exception:
             pass
 
-        # 角色管理器
-        self._character_manager = CharacterManager()
+        # 当前项目ID
+        self._current_project_id: Optional[str] = None
+
+        # 按项目隔离的管理器字典
+        self._character_managers: dict[str, CharacterManager] = {}
+        self._history_stores: dict[str, TTSHistoryStore] = {}
+
+        # 角色管理器（当前项目的，会根据Tab切换而变化）
+        self._character_manager: Optional[CharacterManager] = None
+
+        # 记录主窗口“当前项目”快照，供 TabBar 初始化后对齐
+        try:
+            self._preferred_project_id: Optional[str] = self._main_window.get_current_project_id()
+        except Exception:
+            self._preferred_project_id = None
 
         # 播放器
         self._player: Optional[QMediaPlayer] = None
@@ -1225,6 +1239,9 @@ class AIVoiceInterface(QFrame):
         main_layout.setContentsMargins(20, 12, 20, 12)
         main_layout.setSpacing(12)
 
+        # ========== TabBar（与项目页面同步）==========
+        self._create_tab_bar(main_layout)
+
         # ========== 顶部：角色列表 + 模型选择 ==========
         self._create_top_section(main_layout)
 
@@ -1236,6 +1253,240 @@ class AIVoiceInterface(QFrame):
 
         # 添加弹性空间
         main_layout.addStretch()
+
+    def _create_tab_bar(self, parent_layout: QVBoxLayout):
+        """创建项目TabBar（只读，与项目页面同步）"""
+        self._ai_voice_tab_bar = ProjectTabBar(self)
+        self._ai_voice_tab_bar.setMovable(False)  # 不允许拖拽
+        self._ai_voice_tab_bar.setScrollable(True)
+        self._ai_voice_tab_bar.setTabMaximumWidth(220)
+        self._ai_voice_tab_bar.setMinimumWidth(70)
+        self._ai_voice_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.NEVER)  # 不显示关闭按钮
+        self._ai_voice_tab_bar.setAddButtonVisible(False)  # 不显示添加按钮
+        self._ai_voice_tab_bar.currentChanged.connect(self._on_ai_voice_tab_changed)
+        parent_layout.addWidget(self._ai_voice_tab_bar)
+
+        # 创建 Tab 后立即从项目列表初始化（保证后续 _create_top_section 有可用的 _character_manager）
+        self.init_tabs_from_projects()
+
+        # 对齐到主窗口当前项目；若不可用则回退到第一个项目
+        preferred = str(getattr(self, "_preferred_project_id", None) or "")
+        if preferred and self._find_tab_index(preferred) >= 0:
+            try:
+                self.on_project_tab_switched(preferred)
+            except Exception:
+                pass
+            # on_project_tab_switched 会触发 currentChanged -> _switch_to_project
+            return
+
+        if len(self._ai_voice_tab_bar.items) > 0:
+            try:
+                self._ai_voice_tab_bar.setCurrentIndex(0)
+            except Exception:
+                pass
+            try:
+                self._switch_to_project(self._ai_voice_tab_bar.items[0].routeKey())
+            except Exception:
+                pass
+            return
+
+        # 没有任何项目时：回退到旧的全局角色/历史存储，保持页面可用
+        try:
+            self._character_manager = CharacterManager()
+        except Exception:
+            self._character_manager = None
+
+    def _on_ai_voice_tab_changed(self, index: int):
+        """AI语音页面Tab切换时调用"""
+        if index < 0 or index >= len(self._ai_voice_tab_bar.items):
+            return
+        project_id = self._ai_voice_tab_bar.items[index].routeKey()
+        self._switch_to_project(project_id)
+
+        # 同步“项目”页选中（避免两边项目不一致）
+        try:
+            p = getattr(self._main_window, "project_interface", None)
+            bar = getattr(p, "project_tab_bar", None)
+            if bar is not None:
+                cur = int(bar.currentIndex())
+                if cur != int(index):
+                    bar.setCurrentIndex(int(index))
+        except Exception:
+            pass
+
+    def _switch_to_project(self, project_id: str):
+        """切换到指定项目"""
+        if self._current_project_id == project_id:
+            return
+
+        self._current_project_id = project_id
+
+        # 获取或创建该项目的 CharacterManager
+        if project_id not in self._character_managers:
+            self._character_managers[project_id] = CharacterManager.create_for_project(project_id)
+        self._character_manager = self._character_managers[project_id]
+
+        # 让角色列表控件切到当前项目的数据源（否则 UI 仍绑定旧 manager）
+        try:
+            w = getattr(self, "character_list_widget", None)
+            if w is not None and hasattr(w, "set_character_manager"):
+                w.set_character_manager(self._character_manager)
+        except Exception:
+            pass
+
+        # 获取或创建该项目的 TTSHistoryStore
+        if project_id not in self._history_stores:
+            self._history_stores[project_id] = TTSHistoryStore.create_for_project(project_id)
+
+        # 更新角色列表（仅当 UI 已创建）
+        try:
+            if hasattr(self, "character_list_widget"):
+                self._refresh_character_list()
+        except Exception:
+            pass
+
+        # 清空生成结果（仅当输出区已创建）
+        try:
+            if hasattr(self, "_output_stack"):
+                self._clear_output_state()
+        except Exception:
+            pass
+
+        # 若历史窗口已打开，同步刷新（按当前项目 store）
+        try:
+            self._refresh_history_window_if_open()
+        except Exception:
+            pass
+
+    def _clear_output_state(self):
+        """清空生成结果状态"""
+        try:
+            self._output_wav_paths = ["", "", ""]
+            for w in getattr(self, "output_player_widgets", []):
+                w.set_audio_path("")
+                try:
+                    w.set_loading(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._set_output_empty_state(True)
+        except Exception:
+            pass
+
+    def _get_current_history_store(self) -> TTSHistoryStore:
+        """获取当前项目的历史记录存储"""
+        if self._current_project_id and self._current_project_id in self._history_stores:
+            return self._history_stores[self._current_project_id]
+        return tts_history_store  # 回退到全局的（向后兼容）
+
+    # ==================== 项目同步接口 ====================
+
+    def on_project_tab_added(self, project_id: str, title: str):
+        """项目Tab添加时调用"""
+        # 添加TabBar项
+        tab_item = self._ai_voice_tab_bar.addTab(project_id, title, FluentIcon.MICROPHONE)
+        tab_item.setAutoFillBackground(True)
+
+        # 预创建该项目的管理器
+        if project_id not in self._character_managers:
+            self._character_managers[project_id] = CharacterManager.create_for_project(project_id)
+        if project_id not in self._history_stores:
+            self._history_stores[project_id] = TTSHistoryStore.create_for_project(project_id)
+
+    def on_project_tab_removed(self, project_id: str):
+        """项目Tab删除时调用"""
+        # 查找并移除TabBar项
+        index = self._find_tab_index(project_id)
+        if index >= 0:
+            self._ai_voice_tab_bar.removeTab(index)
+
+        # 清理管理器
+        self._character_managers.pop(project_id, None)
+        self._history_stores.pop(project_id, None)
+
+        # 如果删除的是当前项目，切换到第一个项目
+        if self._current_project_id == project_id:
+            self._current_project_id = None
+            if len(self._ai_voice_tab_bar.items) > 0:
+                first_project_id = self._ai_voice_tab_bar.items[0].routeKey()
+                self._switch_to_project(first_project_id)
+            else:
+                try:
+                    self._character_manager = CharacterManager()
+                except Exception:
+                    self._character_manager = None
+                try:
+                    w = getattr(self, "character_list_widget", None)
+                    if w is not None and self._character_manager is not None and hasattr(w, "set_character_manager"):
+                        w.set_character_manager(self._character_manager)
+                    if hasattr(self, "character_list_widget"):
+                        self._refresh_character_list()
+                except Exception:
+                    pass
+
+    def on_project_tab_renamed(self, project_id: str, new_title: str):
+        """项目Tab重命名时调用"""
+        tab_item = self._ai_voice_tab_bar.tab(project_id)
+        if tab_item:
+            tab_item.setText(new_title)
+
+    def on_project_tab_switched(self, project_id: str):
+        """项目Tab切换时调用（来自项目页面的切换）"""
+        index = self._find_tab_index(project_id)
+        if index >= 0 and index != self._ai_voice_tab_bar.currentIndex():
+            self._ai_voice_tab_bar.setCurrentIndex(index)
+
+    def on_project_tabs_swapped(self, index1: int, index2: int):
+        """项目Tab顺序交换时调用"""
+        # TabBar 不支持直接交换，需要重建
+        # 简化处理：暂不实现Tab顺序同步，因为AI语音页面的Tab只是跟随项目页面
+        pass
+
+    def _find_tab_index(self, project_id: str) -> int:
+        """查找项目ID对应的Tab索引"""
+        for i, item in enumerate(self._ai_voice_tab_bar.items):
+            if item.routeKey() == project_id:
+                return i
+        return -1
+
+    def init_tabs_from_projects(self):
+        """从项目数据初始化所有Tab（启动时调用）"""
+        # 清空旧 tab，避免重复初始化（阻止 currentChanged 回调触发切换逻辑）
+        try:
+            self._ai_voice_tab_bar.blockSignals(True)
+        except Exception:
+            pass
+
+        try:
+            while len(self._ai_voice_tab_bar.items) > 0:
+                self._ai_voice_tab_bar.removeTab(0)
+        except Exception:
+            pass
+
+        # 重建数据容器，避免保留已删除项目的数据
+        try:
+            self._character_managers = {}
+            self._history_stores = {}
+        except Exception:
+            pass
+
+        project_data_dict = config_utility.get_project_data_dict()
+        for project_id, project_data in project_data_dict.items():
+            project_title = project_data.get(ProjectData.TITLE_CONFIG_NAME, "未命名")
+            tab_item = self._ai_voice_tab_bar.addTab(project_id, project_title, FluentIcon.MICROPHONE)
+            tab_item.setAutoFillBackground(True)
+
+            # 预创建管理器
+            self._character_managers[project_id] = CharacterManager.create_for_project(project_id)
+            self._history_stores[project_id] = TTSHistoryStore.create_for_project(project_id)
+        # 当前项目由 _create_tab_bar 或外部信号决定
+
+        try:
+            self._ai_voice_tab_bar.blockSignals(False)
+        except Exception:
+            pass
     
     def _create_top_section(self, parent_layout: QVBoxLayout):
         """创建顶部区域（角色列表 + 模型选择）"""
@@ -1245,9 +1496,14 @@ class AIVoiceInterface(QFrame):
         top_layout.setSpacing(16)
         
         # === 左侧：角色列表（占 2/3 宽度）===
-        self.character_list_widget = CharacterListWidget(
-            self._character_manager, self
-        )
+        # 兜底：确保一定有一个 manager（即使没有项目）
+        if self._character_manager is None:
+            try:
+                self._character_manager = CharacterManager()
+            except Exception:
+                self._character_manager = None
+
+        self.character_list_widget = CharacterListWidget(self._character_manager, self)
         self.character_list_widget.character_selected.connect(self._on_character_selected)
         self.character_list_widget.character_edit_requested.connect(self._on_character_edit)
         self.character_list_widget.character_delete_requested.connect(self._on_character_delete)
@@ -1672,8 +1928,9 @@ class AIVoiceInterface(QFrame):
         目标：输出区展示的 3 条若来自该角色目录，则将其映射到新目录/新文件名。
         """
         try:
-            old_dir = str(tts_history_store.get_character_dir(character_id, old_name) or "")
-            new_dir = str(tts_history_store.get_character_dir(character_id, new_name) or "")
+            store = self._get_current_history_store()
+            old_dir = str(store.get_character_dir(character_id, old_name) or "")
+            new_dir = str(store.get_character_dir(character_id, new_name) or "")
         except Exception:
             return
 
@@ -2031,7 +2288,8 @@ class AIVoiceInterface(QFrame):
 
         # Prevent clobbering temp_output/logs
         try:
-            safe_dir = os.path.basename(tts_history_store.get_character_dir("", candidate))
+            store = self._get_current_history_store()
+            safe_dir = os.path.basename(store.get_character_dir("", candidate))
             if str(safe_dir).strip().lower() == "logs":
                 return False
         except Exception:
@@ -2238,7 +2496,7 @@ class AIVoiceInterface(QFrame):
                                     w.release_media()
                         except Exception:
                             pass
-                        ok = bool(tts_history_store.rename_character_cache(character_id, old_name, str(name)))
+                        ok = bool(self._get_current_history_store().rename_character_cache(character_id, old_name, str(name)))
                         if not ok:
                             InfoBar.warning(
                                 title="历史缓存改名失败",
@@ -2296,7 +2554,7 @@ class AIVoiceInterface(QFrame):
                             w.release_media()
                 except Exception:
                     pass
-                removed = int(tts_history_store.delete_character_cache(character_id, str(getattr(character, "name", "") or "")))
+                removed = int(self._get_current_history_store().delete_character_cache(character_id, str(getattr(character, "name", "") or "")))
                 if removed <= 0:
                     InfoBar.warning(
                         title="缓存删除可能失败",
@@ -2373,6 +2631,8 @@ class AIVoiceInterface(QFrame):
                 pass
             return
         try:
+            if hasattr(win, "set_history_store"):
+                win.set_history_store(self._get_current_history_store())
             win.set_character(character.id, character.name)
         except Exception:
             pass
@@ -2392,9 +2652,15 @@ class AIVoiceInterface(QFrame):
 
         win = getattr(self, "_history_window", None)
         if win is None:
-            win = AIVoiceHistoryWindow(self._main_window, download_callback=self._on_download_audio)
+            win = AIVoiceHistoryWindow(
+                self._main_window,
+                download_callback=self._on_download_audio,
+                history_store=self._get_current_history_store(),
+            )
             self._history_window = win
         try:
+            if hasattr(win, "set_history_store"):
+                win.set_history_store(self._get_current_history_store())
             win.set_character(character.id, character.name)
         except Exception:
             pass
@@ -2407,7 +2673,16 @@ class AIVoiceInterface(QFrame):
 
     def _refresh_character_list(self):
         """刷新角色列表"""
-        self.character_list_widget.refresh()
+        try:
+            if hasattr(self.character_list_widget, "set_character_manager") and (self._character_manager is not None):
+                self.character_list_widget.set_character_manager(self._character_manager)
+            else:
+                self.character_list_widget.refresh()
+        except Exception:
+            try:
+                self.character_list_widget.refresh()
+            except Exception:
+                pass
         # 更新参考音频显示
         self._update_reference_audio_display()
 
@@ -3550,9 +3825,9 @@ class AIVoiceInterface(QFrame):
                 for label in IndexTTSUtility.EMO_LABELS
             ]
 
-        # 输出路径与历史记录：按角色写入 temp_output/<角色>/，并生成序列文件名
+        # 输出路径与历史记录：按项目/角色写入 temp_output/<project>/<角色>/，并生成序列文件名
         try:
-            output_paths = tts_history_store.build_output_paths(character.id, character.name, count=3)
+            output_paths = self._get_current_history_store().build_output_paths(character.id, character.name, count=3)
         except Exception:
             temp_dir = os.path.join(os.getcwd(), "temp_output")
             os.makedirs(temp_dir, exist_ok=True)
@@ -3561,7 +3836,7 @@ class AIVoiceInterface(QFrame):
 
         # 组逻辑：合成文本不变则并入上一组；否则新建一组
         try:
-            group_id = tts_history_store.get_or_create_group_id(character.id, character.name, text)
+            group_id = self._get_current_history_store().get_or_create_group_id(character.id, character.name, text)
         except Exception:
             group_id = str(int(time.time() * 1000))
         self._history_pending = {
@@ -3776,7 +4051,13 @@ class AIVoiceInterface(QFrame):
                     gid = str(pending.get("group_id", ""))
                     txt = str(pending.get("text", ""))
                     if cid and gid:
-                        tts_history_store.append_samples(cid, cname, gid, txt, list(getattr(self, "_output_wav_paths", []) or []))
+                        self._get_current_history_store().append_samples(
+                            cid,
+                            cname,
+                            gid,
+                            txt,
+                            list(getattr(self, "_output_wav_paths", []) or []),
+                        )
                 except Exception:
                     pass
 

@@ -183,6 +183,11 @@ class CharacterListWidget(CardWidget):
     def refresh(self):
         """刷新列表"""
         self._refresh_list()
+
+    def set_character_manager(self, character_manager: CharacterManager):
+        """切换数据源（用于按项目切换角色列表）。"""
+        self._character_manager = character_manager
+        self._refresh_list()
     
     def update_selection(self, selected_id: Optional[str]):
         """更新选中状态"""

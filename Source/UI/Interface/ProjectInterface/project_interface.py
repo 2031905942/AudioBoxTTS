@@ -1,6 +1,7 @@
 import json
 import os
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QFrame, QStackedWidget, QVBoxLayout
 
 import main
@@ -13,6 +14,13 @@ from Source.Utility.game_project_utility import GameProjectUtility
 
 
 class ProjectInterface(QFrame):
+    # 同步信号，用于通知其他页面项目Tab变化
+    project_tab_added = Signal(str, str)      # (project_id, title)
+    project_tab_removed = Signal(str)          # (project_id)
+    project_tab_renamed = Signal(str, str)     # (project_id, new_title)
+    project_tab_switched = Signal(str)         # (project_id)
+    project_tabs_swapped = Signal(int, int)    # (index1, index2)
+
     def __init__(self, parent):
         super().__init__(parent)
         from Source.main_window import MainWindow
@@ -77,6 +85,9 @@ class ProjectInterface(QFrame):
 
         self._main_window.title_bar.refresh()
 
+        # 发射同步信号
+        self.project_tab_switched.emit(project_id)
+
     def on_project_tab_add_requested(self):
         self._project_title_edit_window = LineEditWindow("请输入项目名称")
         self._project_title_edit_window.confirm_signal.connect(self.add_tab)
@@ -91,10 +102,14 @@ class ProjectInterface(QFrame):
             self.project_tab_bar.removeTab(close_tab_index)
             config_utility.remove_project_data(project_id)
             self._main_window.title_bar.refresh()
+            # 发射同步信号
+            self.project_tab_removed.emit(project_id)
 
     def on_tab_item_swaped(self, index: int):
         # print(f"swap_item_index: {index}; current_index: {self._project_tab_bar.currentIndex()}")
         config_utility.swap_project_data(index, self.project_tab_bar.currentIndex())
+        # 发射同步信号
+        self.project_tabs_swapped.emit(index, self.project_tab_bar.currentIndex())
 
     def on_tab_item_rename_requested(self, route_key: str):
         project_id: str = route_key
@@ -117,6 +132,8 @@ class ProjectInterface(QFrame):
         project_tab_item.rename_signal.connect(self.on_tab_item_rename_requested)
         project_tab_window: ProjectTabWindow = ProjectTabWindow(project_id, self._main_window)
         self._project_tab_window_stack.addWidget(project_tab_window)
+        # 发射同步信号
+        self.project_tab_added.emit(project_id, project_title)
         return project_id
 
     def rename_tab(self, route_key: str, title: str):
@@ -127,6 +144,8 @@ class ProjectInterface(QFrame):
         # noinspection PyTypeChecker
         project_tab_window: ProjectTabWindow = self._project_tab_window_stack.findChild(ProjectTabWindow, project_id)
         project_tab_window.refresh_wwise_project_data()
+        # 发射同步信号
+        self.project_tab_renamed.emit(project_id, title)
 
     def add_project_info(self, project_info_dict: dict):
         game_project_name: str = project_info_dict["game_project_name"]
@@ -180,3 +199,5 @@ class ProjectInterface(QFrame):
             self._project_tab_window_stack.addWidget(project_tab_window)
             project_tab_window.refresh_wwise_project_data()
             self._main_window.title_bar.refresh()
+            # 发射同步信号
+            self.project_tab_added.emit(project_id, game_project_name)

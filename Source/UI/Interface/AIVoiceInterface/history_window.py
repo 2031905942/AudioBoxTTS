@@ -17,7 +17,7 @@ from qfluentwidgets import (
 )
 
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ResultAudioPlayerWidget
-from Source.Utility.tts_history_utility import tts_history_store, _format_dt
+from Source.Utility.tts_history_utility import TTSHistoryStore, tts_history_store, _format_dt
 
 
 class AIVoiceHistoryWindow(QWidget):
@@ -27,6 +27,7 @@ class AIVoiceHistoryWindow(QWidget):
         self,
         parent: QWidget,
         download_callback: Callable[[str], None],
+        history_store: TTSHistoryStore | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("历史记录")
@@ -35,6 +36,9 @@ class AIVoiceHistoryWindow(QWidget):
         self.resize(860, 720)
 
         self._download_callback = download_callback
+
+        # 允许按项目注入；未提供时回退到全局 store（向后兼容）
+        self._history_store: TTSHistoryStore = history_store or tts_history_store
 
         self._character_id: str = ""
         self._character_name: str = ""
@@ -93,11 +97,14 @@ class AIVoiceHistoryWindow(QWidget):
             pass
         self.reload()
 
+    def set_history_store(self, history_store: TTSHistoryStore | None):
+        self._history_store = history_store or tts_history_store
+
     def _open_current_character_folder(self):
         if not self._character_id:
             return
         try:
-            folder = tts_history_store.get_character_dir(self._character_id, self._character_name)
+            folder = self._history_store.get_character_dir(self._character_id, self._character_name)
         except Exception:
             folder = ""
         if not folder:
@@ -129,11 +136,11 @@ class AIVoiceHistoryWindow(QWidget):
 
         # 打开历史时顺带裁剪缓存：每个角色最多保留 50 个 wav（按最早生成删除）
         try:
-            tts_history_store.prune_character_cache(self._character_id, self._character_name, max_files=50)
+            self._history_store.prune_character_cache(self._character_id, self._character_name, max_files=50)
         except Exception:
             pass
 
-        entries = tts_history_store.load_entries(self._character_id, self._character_name, limit=50)
+        entries = self._history_store.load_entries(self._character_id, self._character_name, limit=50)
         if not entries:
             self._add_empty("暂无历史记录")
             return
