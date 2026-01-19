@@ -34,6 +34,7 @@ from Source.Utility.dev_config_utility import dev_config_utility
 from Source.UI.Interface.AIVoiceInterface.character_manager import CharacterManager, Character
 from Source.UI.Interface.AIVoiceInterface.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.character_list_widget import CharacterListWidget
+from Source.UI.Interface.AIVoiceInterface.batch_delete_characters_dialog import BatchDeleteCharactersDialog
 from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ReferenceAudioPlayerWidget, ResultAudioPlayerWidget
 from Source.UI.Interface.AIVoiceInterface.history_window import AIVoiceHistoryWindow
 from Source.Utility.tts_history_utility import tts_history_store, TTSHistoryStore
@@ -1327,7 +1328,13 @@ class AIVoiceInterface(QFrame):
     def _switch_to_project(self, project_id: str):
         """切换到指定项目"""
         if self._current_project_id == project_id:
-            return
+            # 防止“Tab 重建/字典重建”后仍持有旧 manager，导致 UI 显示串台
+            try:
+                mgr = self._character_managers.get(project_id)
+                if mgr is not None and self._character_manager is mgr:
+                    return
+            except Exception:
+                return
 
         self._current_project_id = project_id
 
@@ -1445,8 +1452,19 @@ class AIVoiceInterface(QFrame):
     def on_project_tab_switched(self, project_id: str):
         """项目Tab切换时调用（来自项目页面的切换）"""
         index = self._find_tab_index(project_id)
-        if index >= 0 and index != self._ai_voice_tab_bar.currentIndex():
+        if index < 0:
+            return
+
+        # 关键修复：即便 index == currentIndex，也要确保内部 manager/UI 已绑定到该 project
+        if index != self._ai_voice_tab_bar.currentIndex():
             self._ai_voice_tab_bar.setCurrentIndex(index)
+            return
+
+        # currentChanged 不会触发时（例如启动时默认 index 已是 0），这里手动切一次
+        try:
+            self._switch_to_project(project_id)
+        except Exception:
+            pass
 
     def on_project_tabs_swapped(self, index1: int, index2: int):
         """项目Tab顺序交换时调用"""
@@ -1498,6 +1516,8 @@ class AIVoiceInterface(QFrame):
         try:
             self._character_managers = {}
             self._history_stores = {}
+            self._character_manager = None
+            self._current_project_id = None
         except Exception:
             pass
 
@@ -1537,6 +1557,11 @@ class AIVoiceInterface(QFrame):
         self.character_list_widget.character_edit_requested.connect(self._on_character_edit)
         self.character_list_widget.character_delete_requested.connect(self._on_character_delete)
         self.character_list_widget.add_character_requested.connect(self._on_add_character)
+        self.character_list_widget.import_from_wwise_requested.connect(self._on_import_from_wwise)
+        try:
+            self.character_list_widget.batch_delete_requested.connect(self._on_batch_delete_characters)
+        except Exception:
+            pass
         top_layout.addWidget(self.character_list_widget, 2)  # stretch factor 2
         
         # === 右侧：模型选择面板（占 1/3 宽度）===
@@ -1763,6 +1788,10 @@ class AIVoiceInterface(QFrame):
 
         self._update_reference_audio_display()
         self._update_generate_btn_state()
+        try:
+            self.character_list_widget.update_reference_state(character.id, False)
+        except Exception:
+            pass
 
     def _create_text_input_card(self, parent_layout: QHBoxLayout):
         """创建合成文本输入卡片"""
@@ -2525,8 +2554,19 @@ class AIVoiceInterface(QFrame):
                                     w.release_media()
                         except Exception:
                             pass
+                        # 没有任何历史缓存时不应提示“改名失败”
+                        has_old_cache = False
+                        try:
+                            from Source.Utility.tts_history_utility import _sanitize_component
+
+                            safe_old = _sanitize_component(old_name)
+                            desired_old = os.path.join(self._get_current_history_store().base_dir, safe_old)
+                            has_old_cache = bool(safe_old and os.path.isdir(desired_old))
+                        except Exception:
+                            has_old_cache = False
+
                         ok = bool(self._get_current_history_store().rename_character_cache(character_id, old_name, str(name)))
-                        if not ok:
+                        if has_old_cache and (not ok):
                             InfoBar.warning(
                                 title="历史缓存改名失败",
                                 content="可能有音频仍在播放/占用文件，建议停止播放或关闭历史窗口后重试",
@@ -2583,8 +2623,15 @@ class AIVoiceInterface(QFrame):
                             w.release_media()
                 except Exception:
                     pass
+                # 参考音频播放器也可能占用文件
+                try:
+                    if hasattr(self, "ref_player_widget") and hasattr(self.ref_player_widget, "release_media"):
+                        self.ref_player_widget.release_media()
+                except Exception:
+                    pass
+
                 removed = int(self._get_current_history_store().delete_character_cache(character_id, str(getattr(character, "name", "") or "")))
-                if removed <= 0:
+                if removed < 0:
                     InfoBar.warning(
                         title="缓存删除可能失败",
                         content="可能有音频仍在播放/占用文件，建议停止播放或关闭历史窗口后再删除",
@@ -2623,6 +2670,249 @@ class AIVoiceInterface(QFrame):
                 position=InfoBarPosition.TOP,
                 duration=2000
             )
+
+    def _on_batch_delete_characters(self):
+        """批量删除角色（带选择对话框）。"""
+        try:
+            characters = list(self._character_manager.characters or [])
+        except Exception:
+            characters = []
+
+        if not characters:
+            InfoBar.info(
+                title="没有可删除的角色",
+                content="当前项目没有角色",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=1800,
+            )
+            return
+
+        dlg = BatchDeleteCharactersDialog(self._main_window, characters)
+        if not dlg.exec():
+            return
+
+        selected_ids = dlg.get_selected_ids()
+        if not selected_ids:
+            InfoBar.info(
+                title="未选择角色",
+                content="请先勾选要删除的角色",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=1800,
+            )
+            return
+
+        msg = MessageBox(
+            "确认批量删除",
+            f"确定要删除选中的 {len(selected_ids)} 个角色吗？\n删除后将从列表中移除。",
+            self._main_window,
+        )
+        if not msg.exec():
+            return
+
+        # 删除前尽量释放媒体句柄（Windows 删除/改名需要）
+        try:
+            win = getattr(self, "_history_window", None)
+            if win is not None and hasattr(win, "release_all_media"):
+                win.release_all_media()
+        except Exception:
+            pass
+        try:
+            for w in getattr(self, "output_player_widgets", []) or []:
+                if hasattr(w, "release_media"):
+                    w.release_media()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "ref_player_widget") and hasattr(self.ref_player_widget, "release_media"):
+                self.ref_player_widget.release_media()
+        except Exception:
+            pass
+
+        failed_cache = 0
+        deleted = 0
+        for cid in selected_ids:
+            ch = None
+            try:
+                ch = self._character_manager.get_by_id(cid)
+            except Exception:
+                ch = None
+            if ch is None:
+                continue
+
+            try:
+                removed = int(self._get_current_history_store().delete_character_cache(cid, str(getattr(ch, "name", "") or "")))
+                if removed < 0:
+                    failed_cache += 1
+            except Exception:
+                pass
+
+            try:
+                if self._character_manager.delete(cid):
+                    deleted += 1
+            except Exception:
+                pass
+
+        self._refresh_character_list()
+        try:
+            next_id = self._character_manager.selected_id
+            if next_id:
+                self._select_character(next_id)
+            else:
+                self._update_reference_audio_display()
+                self._update_generate_btn_state()
+        except Exception:
+            pass
+        try:
+            self._clear_output_results()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_history_window_if_open()
+        except Exception:
+            pass
+
+        if failed_cache > 0:
+            InfoBar.warning(
+                title="部分缓存删除失败",
+                content=f"有 {failed_cache} 个角色的缓存目录可能仍被占用，可停止播放/关闭历史窗口后再重试删除缓存。",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4500,
+            )
+
+        InfoBar.success(
+            title="批量删除完成",
+            content=f"已删除 {deleted} 个角色",
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=2200,
+        )
+
+    def _on_import_from_wwise(self):
+        """从Wwise项目导入角色"""
+        # 检查是否有当前项目
+        if not self._current_project_id:
+            InfoBar.warning(
+                title="未选择项目",
+                content="请先在项目页面创建或选择一个项目",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3000
+            )
+            return
+
+        # 显示处理中提示
+        InfoBar.info(
+            title="正在扫描",
+            content="正在从Wwise项目中发现角色...",
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=2000
+        )
+
+        try:
+            from Source.Utility.wwise_character_discovery import discover_leaf_work_units_from_project
+            from Source.UI.Interface.AIVoiceInterface.wwise_workunit_import_dialog import WwiseWorkUnitImportDialog
+
+            # 发现叶子 WorkUnit
+            candidates = discover_leaf_work_units_from_project(self._current_project_id)
+            if not candidates:
+                InfoBar.warning(
+                    title="未发现 WorkUnit",
+                    content="未在 Actor-Mixer Hierarchy 下找到可导入的最低层 WorkUnit",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3200,
+                )
+                return
+
+            # 弹窗让用户选择要导入的 WorkUnit
+            dlg = WwiseWorkUnitImportDialog(self._main_window, candidates=candidates)
+            if not dlg.exec():
+                return
+            selected_units = dlg.get_selected_candidates()
+            if not selected_units:
+                InfoBar.info(
+                    title="未选择",
+                    content="未选择任何 WorkUnit，已取消导入",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=2200,
+                )
+                return
+
+            # 记录导入前已有名称，用于导入后自动定位一个新角色
+            try:
+                existed = {str(c.name or "").strip() for c in self._character_manager.characters}
+            except Exception:
+                existed = set()
+
+            characters_data = []
+            for u in selected_units:
+                characters_data.append(
+                    {
+                        "name": str(u.name or "").strip(),
+                        "reference_audio_path": str(u.reference_voice_path or "").strip(),
+                        "avatar_path": "",
+                    }
+                )
+
+            result = self._character_manager.batch_import(characters_data, skip_existing=True)
+            if result.get("imported", 0) > 0:
+                self._refresh_character_list()
+
+                # 自动选中一个新导入的角色，方便直接看到 reference_audio 是否带入
+                try:
+                    for u in selected_units:
+                        n = str(u.name or "").strip()
+                        if n and n not in existed:
+                            c = self._character_manager.get_by_name(n)
+                            if c is not None:
+                                self._select_character(c.id)
+                                break
+                except Exception:
+                    pass
+
+            from Source.UI.Interface.AIVoiceInterface.import_result_dialog import ImportResultDialog
+            ImportResultDialog(
+                self._main_window,
+                imported=int(result.get("imported", 0)),
+                skipped=int(result.get("skipped", 0)),
+                failed=int(result.get("failed", 0)),
+            ).exec()
+
+        except ValueError as e:
+            # 项目配置错误（如未配置Wwise项目路径）
+            InfoBar.error(
+                title="配置错误",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000
+            )
+        except FileNotFoundError as e:
+            # Wwise项目文件不存在
+            InfoBar.error(
+                title="文件不存在",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000
+            )
+        except Exception as e:
+            # 其他错误
+            InfoBar.error(
+                title="导入失败",
+                content=f"从Wwise导入角色时出错: {str(e)}",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000
+            )
+            import traceback
+            traceback.print_exc()
 
     def _select_character(self, character_id: str):
         """选中角色（不置顶）"""
@@ -3700,6 +3990,10 @@ class AIVoiceInterface(QFrame):
         self._character_manager.update_reference_audio(character_id, file_path)
         self._update_reference_audio_display()
         self._update_generate_btn_state()
+        try:
+            self.character_list_widget.update_reference_state(character_id, bool(file_path))
+        except Exception:
+            pass
         
         InfoBar.success(
             title="参考音频已更新",
@@ -4170,6 +4464,14 @@ class AIVoiceInterface(QFrame):
 
     def refresh(self):
         """刷新界面状态（切换到此界面时调用）"""
+        # 进入 AI语音 页时，优先对齐到主窗口当前项目（避免显示默认/旧项目角色）
+        try:
+            pid = str(getattr(self._main_window, "get_current_project_id")() or "").strip()
+            if pid:
+                self.on_project_tab_switched(pid)
+        except Exception:
+            pass
+
         self._refresh_character_list()
         self._check_env_and_model()
         self._update_generate_btn_state()

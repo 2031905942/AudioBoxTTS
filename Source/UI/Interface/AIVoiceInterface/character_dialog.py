@@ -123,8 +123,8 @@ class CharacterDialog(MessageBoxBase):
         name_layout = QHBoxLayout()
         name_label = BodyLabel("昵称:", self)
         self.name_edit = LineEdit(self)
-        self.name_edit.setPlaceholderText("请输入角色昵称（最多10个字符）")
-        self.name_edit.setMaxLength(10)
+        self.name_edit.setPlaceholderText("请输入角色昵称（最多20个字符）")
+        self.name_edit.setMaxLength(20)
         self.name_edit.setText(character_name)
         
         name_layout.addWidget(name_label)

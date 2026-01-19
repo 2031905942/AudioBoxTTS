@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     CardWidget,
-    BodyLabel, CaptionLabel, ScrollArea
+    BodyLabel, CaptionLabel, LineEdit, ScrollArea, TransparentToolButton, FluentIcon
 )
 
 from Source.UI.Interface.AIVoiceInterface.character_button import CharacterButton, AddCharacterButton
@@ -31,6 +31,8 @@ class CharacterListWidget(CardWidget):
     character_edit_requested = Signal(str)
     character_delete_requested = Signal(str)
     add_character_requested = Signal()
+    import_from_wwise_requested = Signal()  # 从Wwise导入角色的信号
+    batch_delete_requested = Signal()  # 批量删除角色
     
     # 布局常量
     COLUMNS = 6
@@ -92,9 +94,29 @@ class CharacterListWidget(CardWidget):
         except Exception:
             pass
         header_layout.addWidget(self._current_character_label)
-        
+
         header_layout.addStretch()
-        
+
+        # 搜索栏：过滤角色列表
+        self._search_edit = LineEdit(header)
+        self._search_edit.setPlaceholderText("搜索角色")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(220)
+        self._search_edit.textChanged.connect(lambda _t="": self._refresh_list())
+        header_layout.addWidget(self._search_edit)
+
+        # 批量删除按钮（垃圾桶）
+        self._batch_delete_btn = TransparentToolButton(FluentIcon.DELETE, header)
+        self._batch_delete_btn.setToolTip("批量删除角色")
+        self._batch_delete_btn.clicked.connect(lambda: self.batch_delete_requested.emit())
+        header_layout.addWidget(self._batch_delete_btn)
+
+        # 从Wwise导入按钮
+        self._import_from_wwise_btn = TransparentToolButton(FluentIcon.DOWNLOAD, header)
+        self._import_from_wwise_btn.setToolTip("从Wwise项目导入角色")
+        self._import_from_wwise_btn.clicked.connect(lambda: self.import_from_wwise_requested.emit())
+        header_layout.addWidget(self._import_from_wwise_btn)
+
         main_layout.addWidget(header)
         
         # === 滚动区域 ===
@@ -141,11 +163,26 @@ class CharacterListWidget(CardWidget):
             if item.widget():
                 item.widget().deleteLater()
         
-        characters = self._character_manager.characters
+        all_characters = self._character_manager.characters
+        characters = all_characters
+        # 搜索过滤
+        try:
+            kw = str(self._search_edit.text() or "").strip().lower() if hasattr(self, "_search_edit") else ""
+        except Exception:
+            kw = ""
+        if kw:
+            characters = [c for c in characters if kw in str(getattr(c, "name", "") or "").lower()]
         selected_id = self._character_manager.selected_id
         
-        # 更新数量
-        self._count_label.setText(f"{len(characters)}/{self._character_manager.MAX_CHARACTERS}")
+        # 更新数量（搜索时显示过滤结果）
+        try:
+            total = len(all_characters)
+        except Exception:
+            total = len(characters)
+        if kw:
+            self._count_label.setText(f"{len(characters)}/{total}/{self._character_manager.MAX_CHARACTERS}")
+        else:
+            self._count_label.setText(f"{total}/{self._character_manager.MAX_CHARACTERS}")
 
         # 更新当前角色显示
         try:
@@ -165,7 +202,13 @@ class CharacterListWidget(CardWidget):
             row = (i + 1) // self.COLUMNS
             col = (i + 1) % self.COLUMNS
             
-            btn = CharacterButton(char.id, char.name, char.avatar_path, self._content_widget)
+            btn = CharacterButton(
+                char.id,
+                char.name,
+                char.avatar_path,
+                self._content_widget,
+                has_reference_audio=bool(getattr(char, "reference_audio_path", "")),
+            )
             btn.set_selected(char.id == selected_id)
             btn.character_selected.connect(self._on_character_selected)
             btn.character_edit_requested.connect(lambda cid: self.character_edit_requested.emit(cid))
@@ -200,6 +243,16 @@ class CharacterListWidget(CardWidget):
             self._set_current_character_text(name)
         except Exception:
             self._set_current_character_text("未选择")
+
+    def update_reference_state(self, character_id: str, has_reference_audio: bool):
+        """仅更新指定角色的“参考音频是否存在”状态（避免整表重建）。"""
+        btn = self._character_buttons.get(character_id)
+        if not btn:
+            return
+        try:
+            btn.set_has_reference_audio(bool(has_reference_audio))
+        except Exception:
+            pass
 
     def _set_current_character_text(self, name: str):
         """设置标题栏右侧的当前角色文字（带省略与 tooltip）。"""

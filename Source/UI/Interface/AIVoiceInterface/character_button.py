@@ -74,6 +74,21 @@ def _make_placeholder_pixmap(text: str, size: int, palette: QPalette) -> QPixmap
     return pm
 
 
+def _tint_icon_pixmap(icon: QIcon, size: int, color: QColor) -> QPixmap:
+    pm = icon.pixmap(size, size)
+    if pm.isNull():
+        return pm
+    out = QPixmap(pm.size())
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.drawPixmap(0, 0, pm)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(out.rect(), color)
+    painter.end()
+    return out
+
+
 class _RoundClickable(QWidget):
     """圆形可点击控件：支持 hover/pressed/selected 的主题化绘制。"""
 
@@ -206,12 +221,13 @@ class CharacterButton(QWidget):
     TOTAL_WIDTH = 74
     TOTAL_HEIGHT = 86
 
-    def __init__(self, character_id: str, name: str, avatar_path: str = "", parent=None):
+    def __init__(self, character_id: str, name: str, avatar_path: str = "", parent=None, *, has_reference_audio: bool = True):
         super().__init__(parent)
         self._character_id = character_id
         self._name = name
         self._avatar_path = avatar_path
         self._is_selected = False
+        self._has_reference_audio = bool(has_reference_audio)
 
         self.setFixedSize(self.TOTAL_WIDTH, self.TOTAL_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -245,6 +261,21 @@ class CharacterButton(QWidget):
         self._edit_btn.clicked.connect(self._on_edit_clicked)
         self._edit_btn.hide()
 
+        # “暂无参考音频”提示：左下角红色麦克风图标（常驻显示）
+        self._missing_ref_btn = _RoundClickable(24, 14, self, draw_background_when_idle=True)
+        try:
+            red = QColor("#d13438")  # Fluent red
+        except Exception:
+            red = QColor(209, 52, 56)
+        self._missing_ref_btn.setPixmap(_tint_icon_pixmap(FluentIcon.MICROPHONE.icon(), 14, red))
+
+        # 仅作提示，不响应点击
+        try:
+            self._missing_ref_btn.setCursor(Qt.CursorShape.ArrowCursor)
+        except Exception:
+            pass
+        self._missing_ref_btn.setVisible(not self._has_reference_audio)
+
         self._layout_overlay_buttons()
         self._refresh_avatar_icon()
 
@@ -253,6 +284,10 @@ class CharacterButton(QWidget):
         x = self.width() - 24
         self._delete_btn.move(x, -4)
         self._edit_btn.move(x, self.AVATAR_SIZE - 18)
+
+        # 左下角：对齐头像左侧
+        avatar_left = (self.width() - self.AVATAR_SIZE) // 2
+        self._missing_ref_btn.move(max(0, avatar_left - 4), self.AVATAR_SIZE - 18)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -310,6 +345,13 @@ class CharacterButton(QWidget):
         self._avatar_path = avatar_path
         self._name_label.setText(name)
         self._refresh_avatar_icon()
+
+    def set_has_reference_audio(self, has_reference_audio: bool):
+        self._has_reference_audio = bool(has_reference_audio)
+        try:
+            self._missing_ref_btn.setVisible(not self._has_reference_audio)
+        except Exception:
+            pass
 
 
 class AddCharacterButton(QWidget):

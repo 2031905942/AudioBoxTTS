@@ -68,7 +68,7 @@ class Character:
 class CharacterManager:
     """角色管理器"""
 
-    MAX_CHARACTERS = 20  # 最大角色数量
+    MAX_CHARACTERS = 60  # 最大角色数量
 
     def __init__(self, config_dir: Optional[str] = None, project_id: Optional[str] = None):
         """
@@ -400,26 +400,96 @@ class CharacterManager:
     def get_suggested_output_path(self, character_id: str) -> tuple[str, str]:
         """
         获取建议的输出路径
-        
+
         Returns:
             (目录, 文件名) 元组
         """
         character = self.get_by_id(character_id)
         if not character:
             return "", ""
-        
+
         output_dir = character.last_output_dir
         filename = character.last_output_filename
-        
+
         # 如果没有上次路径，使用默认值
         if not output_dir:
             from PySide6.QtCore import QStandardPaths
             output_dir = QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.MusicLocation
             )
-        
+
         if not filename:
             import time
             filename = f"{character.name}_{int(time.time())}.wav"
-        
+
         return output_dir, filename
+
+    def get_by_name(self, name: str) -> Optional[Character]:
+        """根据名称获取角色"""
+        for c in self._characters:
+            if c.name == name:
+                return c
+        return None
+
+    def batch_import(self, characters_data: List[Dict[str, str]], skip_existing: bool = True) -> Dict[str, int]:
+        """
+        批量导入角色
+
+        Args:
+            characters_data: 角色数据列表，每个元素包含:
+                - name: 角色名称（必需）
+                - reference_audio_path: 参考音频路径（可选）
+                - avatar_path: 头像路径（可选）
+            skip_existing: 是否跳过已存在的角色（按名称匹配）
+
+        Returns:
+            导入结果统计字典，包含:
+                - imported: 成功导入的角色数
+                - skipped: 跳过的角色数（已存在）
+                - failed: 失败的角色数（名称为空或超出上限）
+        """
+        result = {
+            "imported": 0,
+            "skipped": 0,
+            "failed": 0
+        }
+
+        for char_data in characters_data:
+            name = char_data.get("name", "").strip()
+            if not name:
+                result["failed"] += 1
+                continue
+
+            # 检查是否已存在同名角色
+            if skip_existing and self.get_by_name(name):
+                result["skipped"] += 1
+                continue
+
+            # 检查是否超出上限
+            if not self.can_add:
+                result["failed"] += 1
+                continue
+
+            # 创建新角色
+            reference_audio_path = char_data.get("reference_audio_path", "")
+            avatar_path = char_data.get("avatar_path", "")
+
+            # 写入型操作：若当前仅加载默认文件，则生成本地覆盖文件
+            self._ensure_local_json_for_write()
+
+            character = Character.create(name, avatar_path)
+            if reference_audio_path:
+                character.reference_audio_path = reference_audio_path
+
+            self._characters.append(character)
+            result["imported"] += 1
+
+            # 如果是第一个角色，自动选中
+            if len(self._characters) == 1:
+                self._selected_id = character.id
+
+        # 批量保存一次
+        if result["imported"] > 0:
+            self._save()
+
+        return result

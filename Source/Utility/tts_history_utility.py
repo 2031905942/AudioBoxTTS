@@ -188,7 +188,10 @@ class TTSHistoryStore:
     def delete_character_cache(self, character_id: str, character_name: str = "") -> int:
         """删除该角色在 temp_output 下的整个 <昵称> 文件夹。
 
-        返回：删除的目录数量（0/1）
+        返回：
+        - 1: 成功删除
+        - 0: 目录不存在/无需删除
+        - -1: 删除失败（Windows 文件占用等）
         """
         safe_name = _sanitize_component(character_name) if character_name else ""
         if not safe_name or self._is_reserved_dir_name(safe_name):
@@ -202,7 +205,7 @@ class TTSHistoryStore:
             return 1
         except Exception:
             # Windows 文件占用导致删除失败时，上层会提示用户停止播放后重试
-            return 0
+            return -1
 
     def rename_character_cache(self, character_id: str, old_name: str, new_name: str) -> bool:
         """角色改名时，同步更新 temp_output 下目录名与 wav 文件名前缀，并修正 history.jsonl。"""
