@@ -1308,9 +1308,19 @@ class AIVoiceInterface(QFrame):
             p = getattr(self._main_window, "project_interface", None)
             bar = getattr(p, "project_tab_bar", None)
             if bar is not None:
-                cur = int(bar.currentIndex())
-                if cur != int(index):
-                    bar.setCurrentIndex(int(index))
+                target_index = -1
+                try:
+                    for i, item in enumerate(getattr(bar, "items", [])):
+                        if item.routeKey() == project_id:
+                            target_index = int(i)
+                            break
+                except Exception:
+                    target_index = -1
+
+                if target_index >= 0:
+                    cur = int(bar.currentIndex())
+                    if cur != int(target_index):
+                        bar.setCurrentIndex(int(target_index))
         except Exception:
             pass
 
@@ -1440,9 +1450,28 @@ class AIVoiceInterface(QFrame):
 
     def on_project_tabs_swapped(self, index1: int, index2: int):
         """项目Tab顺序交换时调用"""
-        # TabBar 不支持直接交换，需要重建
-        # 简化处理：暂不实现Tab顺序同步，因为AI语音页面的Tab只是跟随项目页面
-        pass
+        # TabBar 不支持直接交换：这里选择重建一次，保证顺序与“项目”页一致。
+        # 备注：即使不重建，上面的 _on_ai_voice_tab_changed 也已按 project_id 同步，避免 index 错配。
+        try:
+            current_project_id = str(getattr(self._main_window, "get_current_project_id")() or "")
+        except Exception:
+            current_project_id = ""
+
+        try:
+            self.init_tabs_from_projects()
+        except Exception:
+            return
+
+        if current_project_id:
+            try:
+                self.on_project_tab_switched(current_project_id)
+            except Exception:
+                pass
+        elif len(self._ai_voice_tab_bar.items) > 0:
+            try:
+                self._ai_voice_tab_bar.setCurrentIndex(0)
+            except Exception:
+                pass
 
     def _find_tab_index(self, project_id: str) -> int:
         """查找项目ID对应的Tab索引"""
@@ -3829,7 +3858,12 @@ class AIVoiceInterface(QFrame):
         try:
             output_paths = self._get_current_history_store().build_output_paths(character.id, character.name, count=3)
         except Exception:
-            temp_dir = os.path.join(os.getcwd(), "temp_output")
+            # 极端情况下 build_output_paths 失败时，仍尽量保持按项目隔离，避免写入全局 temp_output
+            project_dir = str(getattr(self, "_current_project_id", "") or "")
+            if project_dir:
+                temp_dir = os.path.join(os.getcwd(), "temp_output", project_dir)
+            else:
+                temp_dir = os.path.join(os.getcwd(), "temp_output")
             os.makedirs(temp_dir, exist_ok=True)
             ts = int(time.time())
             output_paths = [os.path.join(temp_dir, f"temp_{ts}_v{i + 1}.wav") for i in range(3)]
