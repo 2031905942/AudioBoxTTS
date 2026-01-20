@@ -23,7 +23,7 @@ from Source.UI.Interface.setting_interface import SettingInterface
 from Source.Job.indextts_job import IndexTTSJob
 from Source.Job.indextts_download_job import IndexTTSDownloadJob
 from Source.Job.indextts_env_job import IndexTTSEnvJob
-from Source.UI.Interface.AIVoiceInterface.ai_voice_interface import AIVoiceInterface
+from Source.UI.Interface.AIVoiceInterface import AIVoiceInterface
 from Source.Utility.config_utility import config_utility
 from Source.Utility.dev_config_utility import dev_config_utility
 from Source.Utility.wproj_utility import WprojUtility
@@ -82,22 +82,7 @@ class MainWindow(MSFluentWindow):
 
         self._changelog_window: Optional[ChangelogWindow] = None
         self._last_interface_index: int | None = None
-        self._ai_voice_welcome_request_id: int = 0
-        self._ai_voice_welcome_shown_runtime: bool = False
         self.show_changelog()
-
-    def _show_ai_voice_welcome_if_still_current(self, request_id: int):
-        """仅当计时结束时仍停留在 AI语音 页时才显示欢迎弹窗。"""
-        try:
-            if request_id != self._ai_voice_welcome_request_id:
-                return
-            if self.stackedWidget.currentWidget() != self.ai_voice_interface:
-                return
-            shown = bool(self.ai_voice_interface.show_first_time_welcome_from_project())
-            if shown:
-                self._ai_voice_welcome_shown_runtime = True
-        except Exception:
-            pass
 
     def init_title_bar(self):
         """设置窗口的自定义标题栏"""
@@ -155,9 +140,6 @@ class MainWindow(MSFluentWindow):
         """
         prev = self._last_interface_index
 
-        # 任何切换都会作废此前挂起的欢迎弹窗计时器（避免切走后才弹出）
-        self._ai_voice_welcome_request_id += 1
-
         if index == self.stackedWidget.indexOf(self.setting_interface):
             self.setting_interface.refresh_project_setting_frame()
 
@@ -172,21 +154,16 @@ class MainWindow(MSFluentWindow):
             except Exception:
                 pass
 
-            # 开发欢迎弹窗：force=true 时，每次应用启动进入 AI语音 延迟 0.5s 弹一次
+            # 欢迎弹窗：逻辑由 AIVoiceInterface 内部统一处理（仅依赖 dev.default.json/dev.json）
             try:
-                force_enabled = False
-                try:
-                    force_enabled = bool(dev_config_utility.force_ai_voice_welcome_every_time())
-                except Exception:
-                    force_enabled = False
-
-                # force=true 时，每次应用启动仅弹一次（不是每次切页都弹）
-                if force_enabled and (not self._ai_voice_welcome_shown_runtime):
-                    request_id = self._ai_voice_welcome_request_id
-                    QTimer.singleShot(
-                        500,
-                        lambda rid=request_id: self._show_ai_voice_welcome_if_still_current(rid),
-                    )
+                QTimer.singleShot(
+                    80,
+                    lambda: (
+                        self.ai_voice_interface.show_first_time_welcome_from_project()
+                        if self.stackedWidget.currentWidget() == self.ai_voice_interface
+                        else None
+                    ),
+                )
             except Exception:
                 pass
 

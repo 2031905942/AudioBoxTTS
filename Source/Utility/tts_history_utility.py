@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -17,6 +18,32 @@ def _sanitize_component(name: str) -> str:
     name = re.sub(r"\s+", "_", name)
     name = name.strip("._ ")
     return name or "role"
+
+
+def _sanitize_project_dir_name(name: str) -> str:
+    """Make a filesystem-safe project folder name.
+
+    Project folder should be more readable than role folder:
+    - keep '-' and '_' and Chinese characters
+    - replace whitespace with '-'
+    """
+    if not name:
+        return "project"
+    name = str(name).strip()
+    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
+    name = re.sub(r"\s+", "-", name)
+    name = name.strip("._ -")
+    return name or "project"
+
+
+def _short_hash(text: str, length: int = 8) -> str:
+    """Stable short hash for uniqueness suffix."""
+    try:
+        h = hashlib.sha1(str(text).encode("utf-8"), usedforsecurity=False).hexdigest()
+    except TypeError:
+        # Python <3.9 compatibility for usedforsecurity
+        h = hashlib.sha1(str(text).encode("utf-8")).hexdigest()
+    return h[: max(4, int(length))]
 
 
 def _format_dt(epoch_ms: int) -> str:
@@ -54,25 +81,150 @@ class TTSHistoryStore:
 
     INDEX_FILENAME = "history.jsonl"
 
-    def __init__(self, base_dir: Optional[str] = None, project_id: Optional[str] = None):
+    PROJECT_ID_MARKER = ".project_id"
+
+    def __init__(
+        self,
+        base_dir: Optional[str] = None,
+        project_id: Optional[str] = None,
+        project_name: Optional[str] = None,
+    ):
         """
         初始化历史记录存储
 
         Args:
             base_dir: 基础目录，默认为 temp_output
-            project_id: 项目ID，有值时按项目隔离存储到 temp_output/{project_id}/
+            project_id: 项目ID，有值时按项目隔离存储到 temp_output/<项目名>/
+            project_name: 项目名称（用于生成更易读的项目目录名）
         """
         default_base = base_dir or os.path.join(os.getcwd(), "temp_output")
+        self._project_id = project_id
+        self._project_name = project_name
+
         if project_id:
-            self._base_dir = os.path.join(default_base, project_id)
+            self._base_dir = self._resolve_project_base_dir(default_base, project_id, project_name)
         else:
             self._base_dir = default_base
-        self._project_id = project_id
+
+    def _marker_path(self, project_dir: str) -> str:
+        return os.path.join(project_dir, self.PROJECT_ID_MARKER)
+
+    def _read_marker(self, project_dir: str) -> str:
+        p = self._marker_path(project_dir)
+        try:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    return str(f.read() or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _ensure_marker(self):
+        if not self._project_id:
+            return
+        try:
+            os.makedirs(self._base_dir, exist_ok=True)
+        except Exception:
+            return
+
+        p = self._marker_path(self._base_dir)
+        try:
+            if os.path.exists(p):
+                return
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(str(self._project_id))
+        except Exception:
+            pass
+
+    def _find_existing_project_dir(self, default_base: str, project_id: str) -> str:
+        """Find an existing project directory by marker (to preserve history on renames)."""
+        try:
+            if not os.path.isdir(default_base):
+                return ""
+            for name in os.listdir(default_base):
+                if self._is_reserved_dir_name(name):
+                    continue
+                candidate = os.path.join(default_base, name)
+                if not os.path.isdir(candidate):
+                    continue
+                if str(self._read_marker(candidate)) == str(project_id):
+                    return candidate
+        except Exception:
+            return ""
+        return ""
+
+    def _resolve_project_base_dir(self, default_base: str, project_id: str, project_name: Optional[str]) -> str:
+        """Resolve per-project root dir under temp_output using human-readable name.
+
+        Strategy:
+        1) If an existing folder contains marker for this project_id, reuse it.
+        2) Otherwise, use sanitized project_name.
+        3) If name conflicts, append a stable short hash suffix.
+        """
+
+        existing = self._find_existing_project_dir(default_base, project_id)
+        desired = _sanitize_project_dir_name(project_name or "")
+        if self._is_reserved_dir_name(desired):
+            desired = "project"
+
+        if existing:
+            # If name changed, try to rename to desired (best-effort, no hard failure).
+            try:
+                current_name = os.path.basename(existing)
+                if desired and current_name != desired:
+                    target = os.path.join(default_base, desired)
+                    if os.path.abspath(target) != os.path.abspath(existing):
+                        if not os.path.exists(target):
+                            os.rename(existing, target)
+                            return target
+                        # Conflict: append hash
+                        target = os.path.join(default_base, f"{desired}-{_short_hash(project_id)}")
+                        if not os.path.exists(target):
+                            os.rename(existing, target)
+                            return target
+            except Exception:
+                pass
+            return existing
+
+        base_name = desired or "project"
+        candidate = os.path.join(default_base, base_name)
+        marker = self._marker_path(candidate)
+        if not os.path.exists(candidate):
+            return candidate
+
+        # If folder exists but belongs to same project, reuse it.
+        try:
+            if os.path.exists(marker) and str(self._read_marker(candidate)) == str(project_id):
+                return candidate
+        except Exception:
+            pass
+
+        # Conflict: deterministic suffix
+        suffix = _short_hash(project_id)
+        candidate2 = os.path.join(default_base, f"{base_name}-{suffix}")
+        if not os.path.exists(candidate2):
+            return candidate2
+
+        # Extremely unlikely: keep adding numeric suffix.
+        for i in range(2, 1000):
+            cand = os.path.join(default_base, f"{base_name}-{suffix}-{i}")
+            if not os.path.exists(cand):
+                return cand
+            try:
+                if os.path.exists(self._marker_path(cand)) and str(self._read_marker(cand)) == str(project_id):
+                    return cand
+            except Exception:
+                continue
+        return candidate2
 
     @staticmethod
-    def create_for_project(project_id: str, base_dir: Optional[str] = None) -> "TTSHistoryStore":
+    def create_for_project(
+        project_id: str,
+        project_name: Optional[str] = None,
+        base_dir: Optional[str] = None,
+    ) -> "TTSHistoryStore":
         """为指定项目创建历史记录存储"""
-        return TTSHistoryStore(base_dir=base_dir, project_id=project_id)
+        return TTSHistoryStore(base_dir=base_dir, project_id=project_id, project_name=project_name)
 
     @property
     def base_dir(self) -> str:
@@ -81,6 +233,19 @@ class TTSHistoryStore:
     @property
     def project_id(self) -> Optional[str]:
         return self._project_id
+
+    @property
+    def project_name(self) -> Optional[str]:
+        return self._project_name
+
+    def set_project_name(self, project_name: Optional[str]):
+        """更新项目名（用于项目重命名后写入到新的更易读目录）。"""
+        if not self._project_id:
+            self._project_name = project_name
+            return
+        default_base = os.path.dirname(self._base_dir)
+        self._project_name = project_name
+        self._base_dir = self._resolve_project_base_dir(default_base, str(self._project_id), project_name)
 
     def get_character_dir(self, character_id: str, character_name: str) -> str:
         # New rule: folder name is only the (sanitized) nickname.
@@ -333,6 +498,12 @@ class TTSHistoryStore:
         return os.path.join(self.get_character_dir(character_id, character_name), self.INDEX_FILENAME)
 
     def ensure_character_dir(self, character_id: str, character_name: str) -> str:
+        # Ensure project folder exists and marker is written.
+        try:
+            self._ensure_marker()
+        except Exception:
+            pass
+
         safe_name = _sanitize_component(character_name)
         if self._is_reserved_dir_name(safe_name):
             # Avoid clobbering temp_output/logs.

@@ -1,19 +1,17 @@
-"""
-Wwise角色导入结果对话框
+"""Wwise角色导入结果对话框
 
 显示从Wwise项目导入角色的结果统计
 """
-from PySide6.QtCore import Qt
+
 from PySide6.QtWidgets import QVBoxLayout
-from qfluentwidgets import MessageBoxBase, SubtitleLabel, BodyLabel
+from qfluentwidgets import BodyLabel, MessageBoxBase, SubtitleLabel
 
 
 class ImportResultDialog(MessageBoxBase):
     """导入结果对话框"""
 
     def __init__(self, parent=None, imported: int = 0, skipped: int = 0, failed: int = 0):
-        """
-        初始化对话框
+        """初始化对话框
 
         Args:
             parent: 父窗口
@@ -21,6 +19,7 @@ class ImportResultDialog(MessageBoxBase):
             skipped: 跳过的角色数（已存在）
             failed: 失败的角色数
         """
+
         super().__init__(parent)
 
         self._imported = imported

@@ -10,8 +10,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap, QPalette, QFont, QColor, QPen
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 from qfluentwidgets import CaptionLabel, FluentIcon
@@ -19,8 +19,8 @@ from qfluentwidgets import CaptionLabel, FluentIcon
 
 def _get_project_root() -> str:
     here = os.path.abspath(__file__)
-    # .../Source/UI/Interface/AIVoiceInterface/character_button.py -> repo root
-    return os.path.abspath(os.path.join(os.path.dirname(here), "..", "..", "..", "..", ".."))
+    # .../Source/UI/Interface/AIVoiceInterface/widgets/character_button.py -> repo root
+    return os.path.abspath(os.path.join(os.path.dirname(here), "..", "..", "..", "..", "..", ".."))
 
 
 def _resolve_avatar_path(path: str) -> str:
@@ -32,7 +32,12 @@ def _resolve_avatar_path(path: str) -> str:
 
 
 def _make_round_pixmap(src: QPixmap, size: int) -> QPixmap:
-    scaled = src.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+    scaled = src.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
     x = (scaled.width() - size) // 2
     y = (scaled.height() - size) // 2
     cropped = scaled.copy(x, y, size, size)
@@ -163,7 +168,6 @@ class _RoundClickable(QWidget):
 
         # 主题化颜色：避免硬编码
         pal = self.palette()
-        bg = pal.color(QPalette.ColorRole.Base)
         border = pal.color(QPalette.ColorRole.Mid)
         hover_bg = pal.color(QPalette.ColorRole.Midlight)
         accent = pal.color(QPalette.ColorRole.Highlight)
@@ -221,7 +225,15 @@ class CharacterButton(QWidget):
     TOTAL_WIDTH = 74
     TOTAL_HEIGHT = 86
 
-    def __init__(self, character_id: str, name: str, avatar_path: str = "", parent=None, *, has_reference_audio: bool = True):
+    def __init__(
+        self,
+        character_id: str,
+        name: str,
+        avatar_path: str = "",
+        parent=None,
+        *,
+        has_reference_audio: bool = True,
+    ):
         super().__init__(parent)
         self._character_id = character_id
         self._name = name
@@ -231,8 +243,6 @@ class CharacterButton(QWidget):
 
         self.setFixedSize(self.TOTAL_WIDTH, self.TOTAL_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 移除 ToolTipFilter 以修复点击后 tooltip 持久存在的 bug
-        # self.installEventFilter(ToolTipFilter(self, 400, ToolTipPosition.TOP))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -367,8 +377,6 @@ class AddCharacterButton(QWidget):
         super().__init__(parent)
         self.setFixedSize(self.TOTAL_WIDTH, self.TOTAL_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 移除 ToolTipFilter 以修复点击后 tooltip 持久存在的 bug
-        # self.installEventFilter(ToolTipFilter(self, 400, ToolTipPosition.TOP))
         # 不显示 tooltip（避免悬停弹出文本框）
         self.setToolTip("")
 
@@ -387,5 +395,3 @@ class AddCharacterButton(QWidget):
         self._label.setFixedWidth(self.TOTAL_WIDTH)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._label)
-
-    

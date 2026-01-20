@@ -1,22 +1,21 @@
 import os
 import sys
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     BodyLabel,
-    CaptionLabel,
     CardWidget,
+    FluentIcon,
     ScrollArea,
     StrongBodyLabel,
-    FluentIcon,
     TransparentToolButton,
 )
 
-from Source.UI.Interface.AIVoiceInterface.audio_player_widget import ResultAudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.widgets.audio_player_widget import ResultAudioPlayerWidget
 from Source.Utility.tts_history_utility import TTSHistoryStore, tts_history_store, _format_dt
 
 
@@ -119,8 +118,8 @@ class AIVoiceHistoryWindow(QWidget):
         except Exception:
             pass
         try:
-            from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
         except Exception:
@@ -158,7 +157,7 @@ class AIVoiceHistoryWindow(QWidget):
 
         group_rows.sort(key=lambda x: x[0], reverse=True)
 
-        for g_time, gid, text, rows in group_rows:
+        for g_time, _gid, text, rows in group_rows:
             self._add_group(g_time, text, rows)
 
         self._list_layout.addStretch(1)
@@ -231,7 +230,7 @@ class AIVoiceHistoryWindow(QWidget):
         card_layout.addWidget(header)
 
         # samples
-        for i, e in enumerate(sorted(rows, key=lambda x: int(x.get("created_at_ms", 0) or 0), reverse=False)):
+        for e in sorted(rows, key=lambda x: int(x.get("created_at_ms", 0) or 0), reverse=False):
             wav = str(e.get("wav_path", ""))
             if not wav or not os.path.exists(wav):
                 continue

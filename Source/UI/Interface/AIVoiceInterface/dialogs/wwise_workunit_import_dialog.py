@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import List, Tuple
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QListWidgetItem
+from PySide6.QtWidgets import QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     BodyLabel,
