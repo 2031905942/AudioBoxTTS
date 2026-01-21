@@ -12,6 +12,7 @@ from qfluentwidgets import PrimaryPushButton, PushButton, TeachingTip, TeachingT
 
 from Source.UI.Interface.AIVoiceInterface.core.ui_overlays import _ModalInputBlockerOverlay
 from Source.UI.Interface.AIVoiceInterface.dialogs.online_model import OnlineModelDialog
+from Source.Utility.indextts_utility import IndexTTSUtility
 
 
 class OnboardingGuideMixin:
@@ -533,9 +534,12 @@ class OnboardingGuideMixin:
     def _on_use_local_model_clicked(self):
         """打开“使用本地模型”弹窗，并在打开时触发一次环境检测（仅更新状态）。"""
         try:
-            audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-            save_dir = os.path.join(audiobox_root, "checkpoints")
+            # 统一模型目录来源：避免 refactor 后误指向 Source/checkpoints。
+            save_dir = IndexTTSUtility.get_default_model_dir()
+            try:
+                save_dir = os.path.abspath(save_dir)
+            except Exception:
+                pass
             self._pending_save_dir = save_dir
 
             dlg = self._ensure_local_model_dialog()

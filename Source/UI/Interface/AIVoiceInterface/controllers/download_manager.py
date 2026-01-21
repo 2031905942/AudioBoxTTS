@@ -23,6 +23,30 @@ from Source.Utility.indextts_utility import IndexTTSUtility
 class DownloadManagerMixin:
     """Mixin for download and environment management operations."""
 
+    def _set_env_job_context(
+        self,
+        *,
+        action: str,
+        continue_download: bool = False,
+        pending_save_dir: str | None = None,
+    ):
+        """记录最近一次环境安装/卸载操作的上下文。
+
+        目的：避免“卸载环境/删除资源”后因为残留状态误触发下载流程。
+        """
+        try:
+            self._env_job_action = str(action or "")
+        except Exception:
+            self._env_job_action = ""
+        try:
+            self._env_job_continue_download = bool(continue_download)
+        except Exception:
+            self._env_job_continue_download = False
+        try:
+            self._pending_save_dir = pending_save_dir
+        except Exception:
+            self._pending_save_dir = None
+
     def _on_download_clicked(self):
         """下载或删除依赖和模型"""
         if getattr(self, "_synthesis_in_progress", False):
@@ -34,12 +58,25 @@ class DownloadManagerMixin:
                 duration=2000,
             )
             return
-        audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-        save_dir = os.path.join(audiobox_root, "checkpoints")
-        
-        # 保存路径以防万一
-        self._pending_save_dir = save_dir
+        # 统一模型目录来源：避免 refactor 后误指向 Source/checkpoints。
+        save_dir = IndexTTSUtility.get_default_model_dir()
+        try:
+            save_dir = os.path.abspath(save_dir)
+        except Exception:
+            pass
+
+        # 刷新一次快照，避免依赖缓存状态导致误判
+        try:
+            self._check_env_and_model()
+        except Exception:
+            pass
+
+        # 仅在“安装环境后继续下载模型”的链路中才需要 pending_save_dir
+        if not bool(getattr(self, "_is_delete_mode", False)):
+            try:
+                self._pending_save_dir = None
+            except Exception:
+                pass
 
         # 下载模式：首次点击前做一次设备预检（删除模式不拦截）
         if not getattr(self, "_is_delete_mode", False):
@@ -70,6 +107,13 @@ class DownloadManagerMixin:
         last_ready = getattr(self, "_env_check_last_ready", None)
         last_msg = str(getattr(self, "_env_check_last_msg", "") or "")
 
+        # 若快速快照显示环境未就绪，则不要相信之前缓存的 "last_ready=True"。
+        try:
+            if (last_ready is True) and (not bool(getattr(self, "_env_ok_fast", False))):
+                last_ready = None
+        except Exception:
+            pass
+
         if last_ready is True:
             self._download_model_files(save_dir)
             return
@@ -78,7 +122,7 @@ class DownloadManagerMixin:
             dialog = EnvMissingInstallDialog(self._main_window, last_msg)
             res = dialog.exec()
             if res and dialog.choice == "install":
-                self._pending_save_dir = save_dir
+                self._set_env_job_context(action="install", continue_download=True, pending_save_dir=save_dir)
                 try:
                     from PySide6.QtCore import Qt
 
@@ -174,6 +218,8 @@ class DownloadManagerMixin:
 
     def _download_env_only(self):
         """仅安装 IndexTTS2 独立环境依赖（Runtime/IndexTTS2/.venv）。"""
+        # 单独安装环境：仅更新状态，不自动触发模型下载
+        self._set_env_job_context(action="install", continue_download=False, pending_save_dir=None)
         try:
             from PySide6.QtCore import Qt
 
@@ -205,6 +251,13 @@ class DownloadManagerMixin:
         if self._env_check_pending:
             return
 
+        # 资源状态代号：当用户在检测期间执行“删除模型/删除环境”等破坏性操作时，
+        # 我们需要丢弃过期的检测结果，避免误弹窗/误触发下载。
+        try:
+            assets_epoch = int(getattr(self, "_assets_epoch", 0) or 0)
+        except Exception:
+            assets_epoch = 0
+
         self._env_check_pending = True
         self._env_check_request_id += 1
         request_id = self._env_check_request_id
@@ -231,6 +284,7 @@ class DownloadManagerMixin:
                 is_ready,
                 msg,
                 save_dir,
+                assets_epoch=assets_epoch,
                 show_install_dialog_on_missing=bool(show_install_dialog_on_missing),
                 on_ready=str(on_ready or "download"),
             )
@@ -271,12 +325,20 @@ class DownloadManagerMixin:
         msg: str,
         save_dir: str,
         *,
+        assets_epoch: int | None = None,
         show_install_dialog_on_missing: bool = True,
         on_ready: str = "download",
     ):
         """环境检测完成回调"""
         if request_id != self._env_check_request_id:
             return
+
+        # 若期间发生过删除等破坏性操作，丢弃该次检测的“后续动作”（弹窗/自动下载）。
+        try:
+            current_epoch = int(getattr(self, "_assets_epoch", 0) or 0)
+        except Exception:
+            current_epoch = 0
+        is_stale = (assets_epoch is not None) and (int(assets_epoch) != int(current_epoch))
 
         self._env_check_pending = False
         self._env_check_worker = None
@@ -290,11 +352,22 @@ class DownloadManagerMixin:
 
         # 缓存最近一次检测结果，供“下载依赖和模型”点击时复用
         try:
-            self._env_check_last_ready = bool(is_ready)
-            self._env_check_last_msg = str(msg or "")
+            if is_stale:
+                self._env_check_last_ready = None
+                self._env_check_last_msg = ""
+            else:
+                self._env_check_last_ready = bool(is_ready)
+                self._env_check_last_msg = str(msg or "")
         except Exception:
-            self._env_check_last_ready = bool(is_ready)
-            self._env_check_last_msg = ""
+            if is_stale:
+                self._env_check_last_ready = None
+                self._env_check_last_msg = ""
+            else:
+                self._env_check_last_ready = bool(is_ready)
+                self._env_check_last_msg = ""
+
+        if is_stale:
+            return
         
         if not is_ready:
 
@@ -305,7 +378,7 @@ class DownloadManagerMixin:
             dialog = EnvMissingInstallDialog(self._main_window, msg)
             res = dialog.exec()
             if res and dialog.choice == "install":
-                self._pending_save_dir = save_dir
+                self._set_env_job_context(action="install", continue_download=True, pending_save_dir=save_dir)
 
                 # 连接信号，等待环境安装完成
                 try:
@@ -340,23 +413,27 @@ class DownloadManagerMixin:
         self._check_env_and_model()
         self._update_generate_btn_state()
 
-        if success:
-            # 环境安装成功，继续下载模型
-            if hasattr(self, '_pending_save_dir') and self._pending_save_dir:
-                # 稍微延迟一下，让用户看清上一个成功的提示
-                QTimer.singleShot(500, lambda: self._download_model_files(self._pending_save_dir))
-                self._pending_save_dir = None
-        else:
-            # 失败了，清理状态
-            self._pending_save_dir = None
+        action = str(getattr(self, "_env_job_action", "") or "")
+        should_continue = bool(getattr(self, "_env_job_continue_download", False))
+
+        # 只在“安装环境 + 继续下载模型”的明确链路中自动进入下载。
+        if success and action == "install" and should_continue:
+            pending_dir = getattr(self, "_pending_save_dir", None)
+            if pending_dir:
+                QTimer.singleShot(500, lambda: self._download_model_files(pending_dir))
+
+        # 无论成功与否都清理上下文，避免下一次卸载/删除误触发。
+        self._set_env_job_context(action="", continue_download=False, pending_save_dir=None)
 
     def _download_model_files(self, save_dir: str):
         """下载模型文件"""
         # 安全检查：如果路径为空，使用默认路径
         if not save_dir:
-            audiobox_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-            save_dir = os.path.join(audiobox_root, "checkpoints")
+            save_dir = IndexTTSUtility.get_default_model_dir()
+        try:
+            save_dir = os.path.abspath(save_dir)
+        except Exception:
+            pass
 
         # 检测是否已完整
         is_complete, missing = IndexTTSUtility.check_model_files(save_dir)
@@ -412,6 +489,18 @@ class DownloadManagerMixin:
             if not msg.exec():
                 return
 
+        # 卸载环境不应触发任何下载流程（清理缓存与 pending 状态）
+        self._set_env_job_context(action="uninstall", continue_download=False, pending_save_dir=None)
+        try:
+            self._assets_epoch = int(getattr(self, "_assets_epoch", 0) or 0) + 1
+        except Exception:
+            self._assets_epoch = 1
+        try:
+            self._env_check_last_ready = None
+            self._env_check_last_msg = ""
+        except Exception:
+            pass
+
         self._main_window.indextts_env_job.uninstall_action()
         self._env_ready = False
         self._update_generate_btn_state()
@@ -444,6 +533,21 @@ class DownloadManagerMixin:
 
         # 注意：确认弹窗在 _show_delete_assets_dialog 中已经执行，这里不再二次确认。
 
+        # 删除模型文件属于破坏性操作：清理环境检测缓存与 pending 状态，避免误用旧结果。
+        try:
+            self._assets_epoch = int(getattr(self, "_assets_epoch", 0) or 0) + 1
+        except Exception:
+            self._assets_epoch = 1
+        try:
+            self._env_check_last_ready = None
+            self._env_check_last_msg = ""
+        except Exception:
+            pass
+        try:
+            self._pending_save_dir = None
+        except Exception:
+            pass
+
         # 收集要删除的文件
         files_to_delete = []
         for filename in IndexTTSUtility.get_required_files():
@@ -475,6 +579,7 @@ class DownloadManagerMixin:
             import shutil
             from PySide6.QtWidgets import QApplication
             deleted_count = 0
+            failed: list[str] = []
             
             # 1. 删除文件
             for i, file_path in enumerate(files_to_delete):
@@ -488,6 +593,10 @@ class DownloadManagerMixin:
                     deleted_count += 1
                 except Exception as e:
                     print(f"删除文件失败: {file_path}, 错误: {e}")
+                    try:
+                        failed.append(str(file_path))
+                    except Exception:
+                        pass
             
             # 2. 删除文件夹
             for dir_path in dirs_to_delete:
@@ -501,6 +610,10 @@ class DownloadManagerMixin:
                     deleted_count += 1
                 except Exception as e:
                     print(f"删除目录失败: {dir_path}, 错误: {e}")
+                    try:
+                        failed.append(str(dir_path))
+                    except Exception:
+                        pass
             
             progress_window.set_current_count(len(files_to_delete) + len(dirs_to_delete))
             progress_window.set_text("文件删除完成，准备卸载依赖...")
@@ -511,6 +624,18 @@ class DownloadManagerMixin:
                 os.rmdir(save_dir)
 
             progress_window.close()
+
+            if failed:
+                try:
+                    InfoBar.warning(
+                        title="部分文件未能删除",
+                        content="有文件/目录可能被占用或权限不足，建议关闭占用程序后重试。",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=5000,
+                    )
+                except Exception:
+                    pass
 
             # 仅删除模型文件：保留独立环境，以便后续重新下载模型更快。
             self._check_env_and_model()

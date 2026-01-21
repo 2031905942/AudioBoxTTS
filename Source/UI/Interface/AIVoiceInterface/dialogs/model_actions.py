@@ -45,7 +45,7 @@ class LocalModelActionsDialog(MessageBoxBase):
 
         content = BodyLabel(
             "首次使用请先下载依赖和模型,下载完成后再加载模型到显存。\n"
-            "若显存较小（例如 8GB），建议启用 FP16（半精度）模式以节省显存。",
+            "若显存小于8GB则无法启用本地模型，显存10-12GB建议启用 FP16（半精度）模式以节省显存。",
             self,
         )
         content.setWordWrap(True)
