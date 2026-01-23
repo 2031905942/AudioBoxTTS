@@ -53,3 +53,7 @@ config/dev.json
 # 下面两条用于“反向覆盖”前面任何可能命中的忽略规则。
 !Python3/
 !Python3/**
+
+# 忽略 claude 整个文件夹
+claude/
+.claude/settings.local.json

@@ -1,0 +1,15 @@
+{
+    "tts_mode": "local",
+    "local": {
+        "model_dir": "checkpoints",
+        "use_fp16": false,
+        "use_cuda_kernel": true,
+        "use_deepspeed": false
+    },
+    "remote": {
+        "url": "http://127.0.0.1:8000",
+        "api_key": "test-key",
+        "timeout": 300,
+        "retry_count": 3
+    }
+}

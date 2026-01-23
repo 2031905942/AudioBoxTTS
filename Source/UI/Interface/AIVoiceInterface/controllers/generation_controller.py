@@ -286,6 +286,72 @@ class GenerationControllerMixin:
                     except Exception:
                         pass
 
+        # 云服务启用流程：仅在远程健康检查完成后才切换按钮样式
+        try:
+            if bool(getattr(self, "_cloud_enable_pending", False)) and (not bool(getattr(self, "_synthesis_in_progress", False))):
+                from Source.Utility.indextts_utility import IndexTTSUtilityFactory
+                from qfluentwidgets import InfoBar, InfoBarPosition
+
+                try:
+                    self._cloud_enable_pending = False
+                except Exception:
+                    pass
+
+                btn_online = getattr(self, "use_online_model_btn", None)
+                btn_local = getattr(self, "use_local_model_btn", None)
+
+                if success:
+                    try:
+                        self._sync_cloud_mode_ui_from_config()
+                    except Exception:
+                        pass
+                    if btn_online is not None:
+                        try:
+                            btn_online.setEnabled(True)
+                        except Exception:
+                            pass
+                    if btn_local is not None:
+                        try:
+                            btn_local.setEnabled(False)
+                        except Exception:
+                            pass
+                    InfoBar.success(
+                        title="已启用云服务",
+                        content="已切换到 IndexTTS2 云端推理模式（本地模型入口已禁用）",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=3000,
+                    )
+                else:
+                    # 回滚到本地模式并恢复按钮
+                    try:
+                        IndexTTSUtilityFactory.set_mode("local")
+                    except Exception:
+                        pass
+                    try:
+                        self._sync_cloud_mode_ui_from_config()
+                    except Exception:
+                        pass
+                    if btn_online is not None:
+                        try:
+                            btn_online.setEnabled(True)
+                        except Exception:
+                            pass
+                    if btn_local is not None:
+                        try:
+                            btn_local.setEnabled(True)
+                        except Exception:
+                            pass
+                    InfoBar.error(
+                        title="云服务启用失败",
+                        content="未能连接云服务，请检查 remote.url 配置或网络后重试。",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=4500,
+                    )
+        except Exception:
+            pass
+
         self._update_model_status()
         self._update_generate_btn_state()
 

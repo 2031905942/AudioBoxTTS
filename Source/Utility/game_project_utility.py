@@ -68,7 +68,7 @@ class GameProjectUtility(FileUtility, SVNUtility):
             },
             "AudioBoxUnityWwiseBankPath": "LovaniaRelease/Bin/WwiseBank",
             "SVNWwiseProjectPath":        {
-                "RemotePath":        "svn://192.168.12.28/lovania_audio/release",
+                "RemotePath":        "svn://192.168.12.28/lovania_audio/branches/release",
                 "LocalRelativePath": "LovaniaWwiseRelease"
             },
             "AudioBoxWwiseProjectPath":   "LovaniaWwiseRelease/Lovania/Lovania.wproj",

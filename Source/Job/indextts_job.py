@@ -11,7 +11,7 @@ from PySide6.QtCore import Signal
 
 from Source.Job.base_job import BaseJob
 from Source.UI.Basic.progress_ring_window import ProgressRingWindow
-from Source.Utility.indextts_utility import IndexTTSUtility
+from Source.Utility.indextts_utility import IndexTTSUtility, IndexTTSUtilityFactory
 
 
 class IndexTTSJob(BaseJob):
@@ -33,6 +33,10 @@ class IndexTTSJob(BaseJob):
         self._utility: Optional[IndexTTSUtility] = None
         self._last_wav_path: Optional[str] = None
         self._is_model_loaded: bool = False
+        try:
+            self._tts_mode: str = str(IndexTTSUtilityFactory.get_current_mode() or "local")
+        except Exception:
+            self._tts_mode = "local"
 
     @property
     def last_wav_path(self) -> Optional[str]:
@@ -135,13 +139,27 @@ class IndexTTSJob(BaseJob):
 
     def _create_utility(self):
         """创建 Utility 实例并连接信号"""
-        # 如果已有实例且模型已加载，保留它
-        if self._utility and self._is_model_loaded:
-            # 只需要重新连接信号
-            pass
-        else:
-            self._utility = IndexTTSUtility()
+        # 根据配置选择 local / remote
+        desired_mode = "local"
+        try:
+            desired_mode = str(IndexTTSUtilityFactory.get_current_mode() or "local")
+        except Exception:
+            desired_mode = "local"
+
+        # 如果模式变更，或没有可复用的已加载实例，则重新创建
+        if (
+            self._utility is None
+            or (self._tts_mode != desired_mode)
+            or (not bool(self._is_model_loaded))
+        ):
+            try:
+                self._utility = IndexTTSUtilityFactory.create()
+            except Exception:
+                # 工厂失败时回退到本地
+                self._utility = IndexTTSUtility()
+                desired_mode = "local"
             self._is_model_loaded = False
+            self._tts_mode = desired_mode
 
         def _safe_disconnect(sig):
             """Qt 信号断开连接：若未连接则不输出 RuntimeWarning。"""

@@ -358,7 +358,7 @@ class UIBuilderMixin:
         """创建合成文本输入卡片"""
         card = CardWidget(self)
         card.setMinimumWidth(300)
-        card.setMinimumHeight(200)
+        card.setMinimumHeight(260)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(16, 16, 16, 16)
         card_layout.setSpacing(12)
@@ -370,7 +370,7 @@ class UIBuilderMixin:
         # 文本输入框（使用 qfluentwidgets 组件）
         self.text_edit = PlainTextEdit(card)
         self.text_edit.setPlaceholderText("在此输入要合成的文本内容...")
-        self.text_edit.setMinimumHeight(120)
+        self.text_edit.setMinimumHeight(160)
         # 防止拖拽文件写入文本框：拖拽导入统一由界面 overlay 接管
         try:
             self.text_edit.setAcceptDrops(False)
@@ -401,7 +401,7 @@ class UIBuilderMixin:
     def _create_output_card(self, parent_layout: QHBoxLayout):
         """创建生成音频结果卡片"""
         container = CardWidget(self)
-        container.setMinimumWidth(200)
+        container.setMinimumWidth(300)
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 16)
         container_layout.setSpacing(12)

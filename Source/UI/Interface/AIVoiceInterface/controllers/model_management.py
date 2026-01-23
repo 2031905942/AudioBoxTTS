@@ -9,6 +9,7 @@ from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MessageBox
 from PySide6.QtCore import QTimer
 
 from Source.Utility.indextts_utility import IndexTTSUtility
+from Source.Utility.indextts_utility import IndexTTSUtilityFactory
 from Source.UI.Interface.AIVoiceInterface.dialogs.diagnostics import ModelDiagnosticsDialog
 
 
@@ -17,6 +18,13 @@ class ModelManagementMixin:
 
     def _check_env_ready_with_warning(self) -> bool:
         """检查 IndexTTS2 环境/模型文件是否就绪；未就绪则弹提示并返回 False。"""
+        # 云服务模式：不检查本地 venv/模型文件
+        try:
+            if str(IndexTTSUtilityFactory.get_current_mode() or "local") == "remote":
+                return True
+        except Exception:
+            pass
+
         # 先刷新一次快照（快速判断，不阻塞）
         try:
             if hasattr(self, "_check_env_and_model"):
@@ -72,7 +80,15 @@ class ModelManagementMixin:
                 title_btn.setToolTip("点击查看模型诊断信息" if is_loaded else "")
                 # 需求：本地模型加载后，"模型选择" 文案改为提示正在使用本地模型
                 try:
-                    title_btn.setText("正在使用本地模型..." if is_loaded else "模型选择")
+                    mode = "local"
+                    try:
+                        mode = str(IndexTTSUtilityFactory.get_current_mode() or "local")
+                    except Exception:
+                        mode = "local"
+                    if is_loaded and mode == "remote":
+                        title_btn.setText("正在使用云服务...")
+                    else:
+                        title_btn.setText("正在使用本地模型..." if is_loaded else "模型选择")
                 except Exception:
                     pass
             except Exception:
@@ -236,6 +252,20 @@ class ModelManagementMixin:
                 duration=2000,
             )
             return
+
+        # 云服务模式下不允许在此处加载/卸载本地模型
+        try:
+            if str(IndexTTSUtilityFactory.get_current_mode() or "local") == "remote":
+                InfoBar.info(
+                    title="云服务模式",
+                    content="已启用云服务：本地模型入口已禁用。若要退出云服务，请再次点击“使用线上模型”。",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3500,
+                )
+                return
+        except Exception:
+            pass
         job = self._main_window.indextts_job
         
         if job.is_model_loaded:

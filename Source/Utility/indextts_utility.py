@@ -483,3 +483,118 @@ class IndexTTSUtility(QObject):
                 pass
 
             self._engine_proc = None
+
+
+class IndexTTSUtilityFactory:
+    """IndexTTS2 Utility 工厂类
+
+    根据配置选择使用本地推理或远程云服务。
+    """
+
+    @staticmethod
+    def create(config: Optional[dict] = None) -> "IndexTTSUtility":
+        """
+        根据配置创建 Utility 实例
+
+        Args:
+            config: 配置字典，格式如下：
+                {
+                    "tts_mode": "local" | "remote",
+                    "local": {...},
+                    "remote": {
+                        "url": "https://tts.example.com",
+                        "api_key": "your-key",
+                        "timeout": 300
+                    }
+                }
+                如果为 None，则从 config/tts_config.json 读取
+
+        Returns:
+            IndexTTSUtility 或 IndexTTSRemoteUtility 实例
+        """
+        if config is None:
+            config = IndexTTSUtilityFactory._load_config()
+
+        mode = config.get("tts_mode", "local")
+
+        if mode == "remote":
+            remote_config = config.get("remote", {})
+            url = remote_config.get("url", "")
+            if not url:
+                raise ValueError("远程模式需要配置 remote.url")
+
+            from Source.Utility.indextts_remote_utility import IndexTTSRemoteUtility
+
+            return IndexTTSRemoteUtility(
+                base_url=url,
+                api_key=remote_config.get("api_key", ""),
+                timeout=remote_config.get("timeout", 300),
+            )
+        else:
+            return IndexTTSUtility()
+
+    @staticmethod
+    def _load_config() -> dict:
+        """从配置文件加载配置"""
+        import json
+
+        # 尝试多个可能的配置文件位置
+        config_paths = [
+            IndexTTSUtilityFactory.get_config_path(),
+        ]
+
+        for path in config_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    continue
+
+        # 默认配置
+        return {"tts_mode": "local"}
+
+    @staticmethod
+    def get_config_path() -> str:
+        """获取 tts_config.json 的绝对路径（仓库内 config/tts_config.json）"""
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return os.path.join(repo_root, "config", "tts_config.json")
+
+    @staticmethod
+    def load_config() -> dict:
+        """公开的配置读取接口（用于 UI 切换模式）"""
+        return IndexTTSUtilityFactory._load_config()
+
+    @staticmethod
+    def save_config(config: dict) -> bool:
+        """保存配置到 config/tts_config.json"""
+        import json
+
+        path = IndexTTSUtilityFactory.get_config_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def set_mode(mode: str) -> bool:
+        """设置当前 TTS 模式（local/remote）并落盘"""
+        mode = str(mode or "local").strip().lower()
+        if mode not in {"local", "remote"}:
+            mode = "local"
+        cfg = IndexTTSUtilityFactory._load_config()
+        cfg["tts_mode"] = mode
+        return IndexTTSUtilityFactory.save_config(cfg)
+
+    @staticmethod
+    def get_current_mode() -> str:
+        """获取当前配置的模式"""
+        config = IndexTTSUtilityFactory._load_config()
+        return config.get("tts_mode", "local")

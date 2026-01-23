@@ -533,6 +533,23 @@ class OnboardingGuideMixin:
 
     def _on_use_local_model_clicked(self):
         """打开“使用本地模型”弹窗，并在打开时触发一次环境检测（仅更新状态）。"""
+        # 云服务模式下禁用本地模型入口
+        try:
+            from Source.Utility.indextts_utility import IndexTTSUtilityFactory
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            if str(IndexTTSUtilityFactory.get_current_mode() or "local") == "remote":
+                InfoBar.info(
+                    title="云服务模式",
+                    content="当前已启用云服务，本地模型入口已禁用。若要使用本地模型，请先取消云服务。",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                )
+                return
+        except Exception:
+            pass
+
         try:
             # 统一模型目录来源：避免 refactor 后误指向 Source/checkpoints。
             save_dir = IndexTTSUtility.get_default_model_dir()
@@ -574,10 +591,125 @@ class OnboardingGuideMixin:
 
 
     def _on_use_online_model_clicked(self):
-        """打开“使用线上模型”弹窗（占位，后续实现 API 管理/模型选择）。"""
+        """点击切换云服务模式。
+
+        - 首次点击：启用 IndexTTS2 云服务（remote），禁用“使用本地模型”，并发起一次远程健康检查（load_model）。
+        - 再次点击：取消云服务（local），释放远程连接资源，并恢复“使用本地模型”。
+        """
         try:
-            dlg = OnlineModelDialog(self._main_window)
-            dlg.exec()
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            from Source.Utility.indextts_utility import IndexTTSUtilityFactory
+
+            if getattr(self, "_synthesis_in_progress", False):
+                InfoBar.info(
+                    title="正在生成",
+                    content="生成进行中，暂不可切换云服务模式",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=2000,
+                )
+                return
+
+            job = getattr(self._main_window, "indextts_job", None)
+            if job is None:
+                return
+
+            current_mode = str(IndexTTSUtilityFactory.get_current_mode() or "local")
+            cfg = IndexTTSUtilityFactory.load_config()
+            remote_cfg = (cfg or {}).get("remote", {}) if isinstance(cfg, dict) else {}
+            remote_url = str(remote_cfg.get("url", "") or "").strip()
+
+            if current_mode != "remote":
+                # 启用云服务
+                if (not remote_url) or ("your-tts-server.com" in remote_url):
+                    InfoBar.warning(
+                        title="未配置云服务地址",
+                        content="请先在 config/tts_config.json 设置 remote.url（云服务地址），再点击启用云服务。",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=5500,
+                    )
+                    return
+
+                # 任务进行中时，不启动云服务切换
+                try:
+                    if bool(job.worker_thread.isRunning()):
+                        InfoBar.info(
+                            title="任务进行中",
+                            content="当前有任务在执行，请稍后再启用云服务。",
+                            parent=self,
+                            position=InfoBarPosition.TOP,
+                            duration=2500,
+                        )
+                        return
+                except Exception:
+                    pass
+
+                # 先卸载/释放当前本地模型资源
+                try:
+                    job.unload_model()
+                except Exception:
+                    pass
+
+                # 进入“启用云服务”待确认状态：先不切换按钮样式
+                try:
+                    self._cloud_enable_pending = True
+                except Exception:
+                    pass
+
+                # 临时切换到 remote 以便健康检查使用远程 utility
+                IndexTTSUtilityFactory.set_mode("remote")
+
+                # 按钮暂时置为“启用中”，避免误导为已成功
+                btn_online = getattr(self, "use_online_model_btn", None)
+                btn_local = getattr(self, "use_local_model_btn", None)
+                if btn_online is not None:
+                    try:
+                        btn_online.setEnabled(False)
+                        btn_online.setText("正在启用云服务...")
+                        btn_online.setToolTip("正在连接云服务，请稍候")
+                        btn_online.setStyleSheet(getattr(self, "_load_btn_style", ""))
+                    except Exception:
+                        pass
+                if btn_local is not None:
+                    try:
+                        btn_local.setEnabled(False)
+                    except Exception:
+                        pass
+
+                # 触发一次远程健康检查（远程 utility 的 load_model 会做 health check）
+                try:
+                    job.load_model_action("", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+                except Exception:
+                    pass
+                return
+
+            # 取消云服务 -> 回到本地
+            try:
+                job.unload_model()
+            except Exception:
+                pass
+
+            IndexTTSUtilityFactory.set_mode("local")
+            try:
+                self._sync_cloud_mode_ui_from_config()
+            except Exception:
+                pass
+
+            try:
+                self._update_model_status()
+                self._update_generate_btn_state()
+            except Exception:
+                pass
+
+            InfoBar.info(
+                title="已取消云服务",
+                content="已恢复本地模式（如需使用本地模型，请打开“使用本地模型”并加载模型）",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3500,
+            )
+
         except Exception:
             pass
 

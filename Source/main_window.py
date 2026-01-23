@@ -104,8 +104,8 @@ class MainWindow(MSFluentWindow):
     def init_main_window(self):
         """初始化主窗口的外观和位置"""
         self.setWindowTitle('音频工具箱')
-        self.resize(1000, 700)
-        self.setMinimumSize(1000, 700)
+        self.resize(1000, 800)
+        self.setMinimumSize(1000, 800)
 
         icon = QIcon()
         icon.addFile("Resource/Icon New.png")

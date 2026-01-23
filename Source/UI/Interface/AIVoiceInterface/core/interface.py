@@ -30,7 +30,7 @@ from qfluentwidgets import (
 from Source.Utility.config_utility import config_utility, ProjectData
 from Source.Utility.dev_config_utility import dev_config_utility
 from Source.Utility.indextts_preflight_utility import IndexTTSPreflightUtility
-from Source.Utility.indextts_utility import IndexTTSUtility
+from Source.Utility.indextts_utility import IndexTTSUtility, IndexTTSUtilityFactory
 from Source.Utility.tts_history_utility import tts_history_store, TTSHistoryStore
 from Source.UI.Basic.progress_bar_window import ProgressBarWindow
 from Source.UI.Basic.project_tab_bar import ProjectTabBar, ProjectTabItem
@@ -164,6 +164,12 @@ class AIVoiceInterface(
         self._init_ui()
         self._connect_signals()
 
+        # 启动时根据配置同步“云服务模式”按钮状态
+        try:
+            self._sync_cloud_mode_ui_from_config()
+        except Exception:
+            pass
+
         # 首次使用引导（运行期缓存，避免多次弹出/被 GC）
         self._welcome_dialog = None
         self._quick_guide_dialog = None
@@ -173,6 +179,69 @@ class AIVoiceInterface(
         # 历史记录窗口（非模态）
         self._history_window = None
         self._history_pending = None
+
+    def _sync_cloud_mode_ui_from_config(self) -> None:
+        """根据 config/tts_config.json 同步按钮状态。
+
+        若当前为 remote：禁用本地入口，并尝试做一次远程健康检查（load_model）。
+        """
+        mode = "local"
+        try:
+            mode = str(IndexTTSUtilityFactory.get_current_mode() or "local")
+        except Exception:
+            mode = "local"
+
+        enabled = (mode == "remote")
+
+        # 复用 OnboardingGuideMixin 里同名按钮
+        btn_online = getattr(self, "use_online_model_btn", None)
+        btn_local = getattr(self, "use_local_model_btn", None)
+
+        if btn_online is not None:
+            try:
+                btn_online.setText("取消云服务" if enabled else "使用线上模型")
+            except Exception:
+                pass
+            try:
+                btn_online.setToolTip(
+                    "点击取消云服务并恢复本地模型入口" if enabled else "点击启用 IndexTTS2 云服务（远程推理）"
+                )
+            except Exception:
+                pass
+            try:
+                if enabled:
+                    btn_online.setStyleSheet(getattr(self, "_load_btn_style_unload", ""))
+                else:
+                    btn_online.setStyleSheet(getattr(self, "_load_btn_style", ""))
+            except Exception:
+                pass
+
+        if btn_local is not None:
+            try:
+                btn_local.setEnabled(not enabled)
+            except Exception:
+                pass
+            try:
+                btn_local.setToolTip(
+                    "云服务模式已启用：本地模型入口已禁用" if enabled else "打开本地 IndexTTS2 模型管理（下载/加载）"
+                )
+            except Exception:
+                pass
+
+        # remote 模式下，尝试在启动时检查一次远程服务就绪状态
+        if enabled:
+            try:
+                job = getattr(self._main_window, "indextts_job", None)
+                if job is not None and (not bool(job.is_model_loaded)):
+                    job.load_model_action("", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+            except Exception:
+                pass
+
+        try:
+            self._update_model_status()
+            self._update_generate_btn_state()
+        except Exception:
+            pass
 
     def refresh(self):
         """进入页面或项目变更时刷新 UI。
