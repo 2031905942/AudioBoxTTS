@@ -15,7 +15,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from Source.UI.Interface.AIVoiceInterface.widgets.audio_player_widget import ResultAudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.widgets.result_audio_player_widget import ResultAudioPlayerWidget
 from Source.Utility.tts_history_utility import TTSHistoryStore, tts_history_store, _format_dt
 
 

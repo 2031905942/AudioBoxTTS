@@ -20,10 +20,8 @@ from qfluentwidgets import (
 from Source.UI.Basic.project_tab_bar import ProjectTabBar
 from Source.UI.Interface.AIVoiceInterface.models.character_manager import CharacterManager
 from Source.UI.Interface.AIVoiceInterface.widgets.character_list_widget import CharacterListWidget
-from Source.UI.Interface.AIVoiceInterface.widgets.audio_player_widget import (
-    ReferenceAudioPlayerWidget,
-    ResultAudioPlayerWidget,
-)
+from Source.UI.Interface.AIVoiceInterface.widgets.reference_audio_player_widget import ReferenceAudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.widgets.result_audio_player_widget import ResultAudioPlayerWidget
 from Source.Utility.indextts_utility import IndexTTSUtility
 
 

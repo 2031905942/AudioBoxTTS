@@ -4,6 +4,9 @@ Character Operations Mixin
 Handles character management operations (add, edit, delete, import).
 """
 import os
+from dataclasses import dataclass
+
+from PySide6.QtCore import QObject, QRunnable, Signal
 from qfluentwidgets import InfoBar, InfoBarPosition, MessageBox
 
 # After refactor, mixins must import the symbols they reference.
@@ -406,21 +409,99 @@ class CharacterOperationsMixin:
             )
             return
 
-        # 显示处理中提示
-        InfoBar.info(
-            title="正在扫描",
-            content="正在从Wwise项目中发现角色...",
-            parent=self,
-            position=InfoBarPosition.TOP,
-            duration=2000
-        )
-
+        # 扫描很重：放后台线程，避免 UI 冻结
         try:
+            from Source.UI.Basic.progress_bar_window import ProgressBarWindow
             from Source.Utility.wwise_character_discovery import discover_leaf_work_units_from_project
             from Source.UI.Interface.AIVoiceInterface.dialogs.wwise_workunit_import_dialog import WwiseWorkUnitImportDialog
+            from Source.UI.Interface.AIVoiceInterface.dialogs.import_result_dialog import ImportResultDialog
+        except Exception as e:
+            InfoBar.error(
+                title="导入失败",
+                content=f"导入模块加载失败: {str(e)}",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+            )
+            return
 
-            # 发现叶子 WorkUnit
-            candidates = discover_leaf_work_units_from_project(self._current_project_id)
+        class _ScanSignals(QObject):
+            progress = Signal(int, int, str)  # current, total, text
+            finished = Signal(object, object)  # candidates(list) | None, error(Exception) | None
+
+        @dataclass
+        class _ScanState:
+            cancelled: bool = False
+
+        state = _ScanState(cancelled=False)
+        signals = _ScanSignals()
+
+        # capture：避免 QRunnable 内 self 变成 worker 自身
+        project_id = str(self._current_project_id)
+
+        progress_win = ProgressBarWindow(self._main_window)
+        progress_win.set_text("正在从 Wwise 扫描 WorkUnit...")
+        progress_win.set_show_counter(True)
+        progress_win.set_enable_cancel(True)
+
+        def _on_cancel():
+            state.cancelled = True
+            try:
+                progress_win.set_text("正在取消...")
+            except Exception:
+                pass
+
+        try:
+            progress_win.cancel_signal.connect(_on_cancel)
+        except Exception:
+            pass
+
+        class _ScanWorker(QRunnable):
+            def run(self):
+                try:
+                    from Source.Utility.wwise_character_discovery import ScanCancelled
+
+                    def _progress(cur: int, total: int, text: str):
+                        try:
+                            signals.progress.emit(int(cur), int(total), str(text or ""))
+                        except Exception:
+                            pass
+
+                    def _is_cancelled() -> bool:
+                        try:
+                            return bool(state.cancelled)
+                        except Exception:
+                            return False
+
+                    candidates = discover_leaf_work_units_from_project(
+                        project_id,
+                        progress_cb=_progress,
+                        is_cancelled=_is_cancelled,
+                    )
+                    if _is_cancelled():
+                        raise ScanCancelled()
+                    signals.finished.emit(candidates, None)
+                except Exception as err:
+                    signals.finished.emit(None, err)
+
+        def _on_progress(cur: int, total: int, text: str):
+            try:
+                if int(total) > 0:
+                    progress_win.set_total_count(int(total))
+                progress_win.set_current_count(int(cur))
+                if text:
+                    progress_win.set_text(str(text))
+            except Exception:
+                pass
+
+        def _cleanup_progress():
+            try:
+                progress_win.close()
+                progress_win.deleteLater()
+            except Exception:
+                pass
+
+        def _do_import_flow(candidates):
             if not candidates:
                 InfoBar.warning(
                     title="未发现 WorkUnit",
@@ -431,7 +512,6 @@ class CharacterOperationsMixin:
                 )
                 return
 
-            # 弹窗让用户选择要导入的 WorkUnit
             dlg = WwiseWorkUnitImportDialog(self._main_window, candidates=candidates)
             if not dlg.exec():
                 return
@@ -446,27 +526,24 @@ class CharacterOperationsMixin:
                 )
                 return
 
-            # 记录导入前已有名称，用于导入后自动定位一个新角色
             try:
                 existed = {str(c.name or "").strip() for c in self._character_manager.characters}
             except Exception:
                 existed = set()
 
-            characters_data = []
-            for u in selected_units:
-                characters_data.append(
-                    {
-                        "name": str(u.name or "").strip(),
-                        "reference_audio_path": str(u.reference_voice_path or "").strip(),
-                        "avatar_path": "",
-                    }
-                )
+            characters_data = [
+                {
+                    "name": str(u.name or "").strip(),
+                    "reference_audio_path": str(u.reference_voice_path or "").strip(),
+                    "avatar_path": "",
+                }
+                for u in selected_units
+            ]
 
             result = self._character_manager.batch_import(characters_data, skip_existing=True)
             if result.get("imported", 0) > 0:
                 self._refresh_character_list()
 
-                # 自动选中一个新导入的角色，方便直接看到 reference_audio 是否带入
                 try:
                     for u in selected_units:
                         n = str(u.name or "").strip()
@@ -478,7 +555,6 @@ class CharacterOperationsMixin:
                 except Exception:
                     pass
 
-            from Source.UI.Interface.AIVoiceInterface.dialogs.import_result_dialog import ImportResultDialog
             ImportResultDialog(
                 self._main_window,
                 imported=int(result.get("imported", 0)),
@@ -486,35 +562,65 @@ class CharacterOperationsMixin:
                 failed=int(result.get("failed", 0)),
             ).exec()
 
-        except ValueError as e:
-            # 项目配置错误（如未配置Wwise项目路径）
-            InfoBar.error(
-                title="配置错误",
-                content=str(e),
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=4000
-            )
-        except FileNotFoundError as e:
-            # Wwise项目文件不存在
-            InfoBar.error(
-                title="文件不存在",
-                content=str(e),
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=4000
-            )
+        def _on_finished(candidates, err):
+            _cleanup_progress()
+
+            if err is not None:
+                # 取消：不弹错误
+                if err.__class__.__name__ == "ScanCancelled":
+                    InfoBar.info(
+                        title="已取消",
+                        content="已取消从 Wwise 扫描角色",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=2000,
+                    )
+                    return
+
+                if isinstance(err, (ValueError, FileNotFoundError)):
+                    InfoBar.error(
+                        title="配置错误" if isinstance(err, ValueError) else "文件不存在",
+                        content=str(err),
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=4000,
+                    )
+                    return
+
+                InfoBar.error(
+                    title="导入失败",
+                    content=f"从Wwise导入角色时出错: {str(err)}",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=4500,
+                )
+                try:
+                    import traceback
+
+                    traceback.print_exc()
+                except Exception:
+                    pass
+                return
+
+            _do_import_flow(candidates)
+
+        signals.progress.connect(_on_progress)
+        signals.finished.connect(_on_finished)
+
+        try:
+            tp = getattr(self._main_window, "threadpool", None)
+            if tp is None:
+                raise RuntimeError("threadpool 不可用")
+            tp.start(_ScanWorker())
         except Exception as e:
-            # 其他错误
+            _cleanup_progress()
             InfoBar.error(
                 title="导入失败",
-                content=f"从Wwise导入角色时出错: {str(e)}",
+                content=f"无法启动后台扫描: {str(e)}",
                 parent=self,
                 position=InfoBarPosition.TOP,
-                duration=4000
+                duration=4500,
             )
-            import traceback
-            traceback.print_exc()
 
 
     def _select_character(self, character_id: str):

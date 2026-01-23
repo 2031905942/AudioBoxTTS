@@ -966,31 +966,14 @@ class _LoadingOverlay(QWidget):
         self.progress.setValue(v)
 
 
-class ReferenceAudioPlayerWidget(AudioPlayerWidget):
-    """参考音频播放器：紧凑 + 可导入空态 + 可清空。"""
-
-    def __init__(self, title="Voice Reference", parent=None):
-        super().__init__(
-            title,
-            parent,
-            compact_mode=True,
-            compact_empty_hint="upload",
-            show_clear_button=True,
-            clear_tooltip="移除参考音频",
-            title_follows_filename=True,
-        )
+# NOTE: 参考音频播放器与生成结果播放器已拆分为独立模块，避免后续扩展互相影响。
+# 这里保留同名导出以兼容旧的 import 路径。
+from .reference_audio_player_widget import ReferenceAudioPlayerWidget  # noqa: E402
+from .result_audio_player_widget import ResultAudioPlayerWidget  # noqa: E402
 
 
-class ResultAudioPlayerWidget(AudioPlayerWidget):
-    """生成结果播放器：紧凑 + 不显示导入空态 + 无清空按钮。"""
-
-    def __init__(self, title="音频", parent=None):
-        super().__init__(
-            title,
-            parent,
-            compact_mode=True,
-            compact_empty_hint="none",
-            show_clear_button=False,
-            # 输出样本希望展示全局 wav 文件名
-            title_follows_filename=True,
-        )
+__all__ = [
+    "AudioPlayerWidget",
+    "ReferenceAudioPlayerWidget",
+    "ResultAudioPlayerWidget",
+]

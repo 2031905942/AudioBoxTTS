@@ -5,78 +5,230 @@
 - 只导入 Voices 作为参考音色（不使用 SFX）
 - 支持按父 WorkUnit（例如 Boss）过滤 + 关键词过滤
 - 支持全选/取消全选，且默认不全选
+
+性能目标：
+- 使用 Model/View 虚拟化渲染，避免为每行创建 QWidget（ListWidget + setItemWidget 的瓶颈）
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Sequence
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QSortFilterProxyModel,
+    QTimer,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QHeaderView, QTableView, QWidget
 
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CheckBox,
-    ComboBox,
     FluentIcon,
     LineEdit,
-    ListWidget,
     MessageBoxBase,
     PushButton,
     SubtitleLabel,
 )
 
+try:
+    # PySide6-Fluent-Widgets: 保留 Fluent 风格，但仍走 Qt Model/View 性能
+    from qfluentwidgets import TableView as FluentTableView
+except Exception:
+    FluentTableView = QTableView
+
 from Source.Utility.wwise_character_discovery import WorkUnitCandidate
 
 
-def _get_top_parent_name(candidate: WorkUnitCandidate) -> str:
-    path = str(candidate.full_path or "").strip()
-    if not path:
-        return ""
-    parts = [p.strip() for p in path.split("/")]
-    parts = [p for p in parts if p]
-    return parts[0] if parts else ""
+@dataclass
+class _WorkUnitRowData:
+    candidate: WorkUnitCandidate
+    checked: bool = False
 
 
-class _WorkUnitRow(QWidget):
-    def __init__(self, candidate: WorkUnitCandidate, parent: QWidget | None = None):
+class _WorkUnitTableModel(QAbstractTableModel):
+    selectionChanged = Signal()
+
+    COL_CHECK = 0
+    COL_PATH = 1
+    COL_HAS_VOICE = 2
+    COL_VOICE_COUNT = 3
+
+    def __init__(self, candidates: Sequence[WorkUnitCandidate], parent: QWidget | None = None):
         super().__init__(parent)
-        self.candidate = candidate
+        self._rows: list[_WorkUnitRowData] = [_WorkUnitRowData(c) for c in candidates]
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(10)
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
 
-        self.check = CheckBox(self)
-        self.check.setChecked(False)
-        layout.addWidget(self.check, 0, Qt.AlignmentFlag.AlignVCenter)
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return 4
 
-        label = str(candidate.full_path or candidate.name or "").strip()
-        self.name_label = BodyLabel(label, self)
-        self.name_label.setWordWrap(False)
-        try:
-            self.name_label.setToolTip(label)
-        except Exception:
-            pass
-        layout.addWidget(self.name_label, 1)
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            if section == self.COL_CHECK:
+                return ""
+            if section == self.COL_PATH:
+                return "WorkUnit"
+            if section == self.COL_HAS_VOICE:
+                return "参考Voice"
+            if section == self.COL_VOICE_COUNT:
+                return "Voice数"
+        return super().headerData(section, orientation, role)
 
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+
+        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if index.column() == self.COL_CHECK:
+            return base | Qt.ItemFlag.ItemIsUserCheckable
+        return base
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        row = index.row()
+        col = index.column()
+        if row < 0 or row >= len(self._rows):
+            return None
+
+        candidate = self._rows[row].candidate
+        full_path = str(getattr(candidate, "full_path", None) or getattr(candidate, "name", None) or "").strip()
         has_voice = bool(getattr(candidate, "reference_voice_path", None))
-        self.voice_label = CaptionLabel("有" if has_voice else "无", self)
-        self.voice_label.setMinimumWidth(64)
-        self.voice_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.voice_label, 0)
+        voice_count = int(getattr(candidate, "voice_count", 0) or 0)
 
-        self.count_label = CaptionLabel(str(int(getattr(candidate, "voice_count", 0) or 0)), self)
-        self.count_label.setMinimumWidth(56)
-        self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.count_label, 0)
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == self.COL_PATH:
+                return full_path
+            if col == self.COL_HAS_VOICE:
+                return "有" if has_voice else "无"
+            if col == self.COL_VOICE_COUNT:
+                return str(voice_count)
+            return None
 
-        if has_voice:
-            try:
-                self.voice_label.setToolTip(str(candidate.reference_voice_path))
-            except Exception:
-                pass
+        if role == Qt.ItemDataRole.CheckStateRole:
+            if col == self.COL_CHECK:
+                return Qt.CheckState.Checked if self._rows[row].checked else Qt.CheckState.Unchecked
+            return None
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if col == self.COL_PATH:
+                return full_path
+            if col == self.COL_HAS_VOICE and has_voice:
+                return str(getattr(candidate, "reference_voice_path", ""))
+            return None
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col in (self.COL_HAS_VOICE, self.COL_VOICE_COUNT):
+                return int(Qt.AlignmentFlag.AlignCenter)
+            return int(Qt.AlignmentFlag.AlignVCenter)
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            # 轻微的行底色差异，保持可读性；避免 heavy stylesheet
+            if row % 2 == 1:
+                return QColor(0, 0, 0, 0)
+            return None
+
+        return None
+
+    def setData(self, index: QModelIndex, value, role: int = Qt.ItemDataRole.EditRole) -> bool:
+        if not index.isValid():
+            return False
+        if index.column() != self.COL_CHECK:
+            return False
+
+        row = index.row()
+        if row < 0 or row >= len(self._rows):
+            return False
+
+        if role == Qt.ItemDataRole.CheckStateRole:
+            checked = value == Qt.CheckState.Checked
+            if self._rows[row].checked == checked:
+                return False
+            self._rows[row].checked = checked
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+            self.selectionChanged.emit()
+            return True
+
+        return False
+
+    def selected_count(self) -> int:
+        return sum(1 for r in self._rows if r.checked)
+
+    def total_count(self) -> int:
+        return len(self._rows)
+
+    def candidates(self) -> list[WorkUnitCandidate]:
+        return [r.candidate for r in self._rows]
+
+    def get_selected_candidates(self) -> list[WorkUnitCandidate]:
+        return [r.candidate for r in self._rows if r.checked]
+
+    def set_checked_for_source_rows(self, source_rows: Sequence[int], checked: bool):
+        changed: list[int] = []
+        for r in source_rows:
+            if 0 <= r < len(self._rows) and self._rows[r].checked != bool(checked):
+                self._rows[r].checked = bool(checked)
+                changed.append(r)
+
+        if not changed:
+            return
+
+        # 批量发射变更信号，避免逐行刷新
+        min_row = min(changed)
+        max_row = max(changed)
+        left = self.index(min_row, self.COL_CHECK)
+        right = self.index(max_row, self.COL_CHECK)
+        self.dataChanged.emit(left, right, [Qt.ItemDataRole.CheckStateRole])
+        self.selectionChanged.emit()
+
+
+class _WorkUnitFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._keyword_filter: str = ""
+        self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+
+    def set_keyword_filter(self, keyword: str):
+        keyword = str(keyword or "").strip().lower()
+        if self._keyword_filter == keyword:
+            return
+        self._keyword_filter = keyword
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        model = self.sourceModel()
+        if model is None:
+            return True
+        if not hasattr(model, "_rows"):
+            return True
+
+        try:
+            row_data = model._rows[source_row]  # type: ignore[attr-defined]
+        except Exception:
+            return True
+
+        candidate = row_data.candidate
+
+        if self._keyword_filter:
+            label = str(getattr(candidate, "full_path", None) or getattr(candidate, "name", None) or "").lower()
+            if self._keyword_filter not in label:
+                return False
+
+        return True
 
 
 class WwiseWorkUnitImportDialog(MessageBoxBase):
@@ -89,11 +241,21 @@ class WwiseWorkUnitImportDialog(MessageBoxBase):
     ):
         super().__init__(parent)
         self._all_candidates: List[WorkUnitCandidate] = list(candidates or [])
-        self._rows: list[Tuple[WorkUnitCandidate, QListWidgetItem, _WorkUnitRow]] = []
+        # 保持参数兼容：外部可能仍传 default_parent，但该版本对话框不再提供“父 WorkUnit”下拉筛选
         self._default_parent = str(default_parent or "").strip()
 
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self._apply_filters)
+
+        self._source_model = _WorkUnitTableModel(self._all_candidates, self)
+        self._proxy_model = _WorkUnitFilterProxyModel(self)
+        self._proxy_model.setSourceModel(self._source_model)
+
         self._init_ui()
-        self._populate()
+        self._apply_filters()
+        self._update_selected_count()
+        self._update_select_toggle_button()
 
     def _init_ui(self):
         title_label = SubtitleLabel("从 Wwise 导入角色（按 WorkUnit）", self)
@@ -104,196 +266,137 @@ class WwiseWorkUnitImportDialog(MessageBoxBase):
         hint.setStyleSheet("color: #6b7280; font-size: 12px;")
         self.viewLayout.addWidget(hint)
 
-        # 筛选行：父 WorkUnit + 关键词
+        # 筛选行：关键词 + 全选按钮 + 已选统计（布局对齐“批量删除角色”对话框）
         filter_row = QWidget(self)
         filter_layout = QHBoxLayout(filter_row)
         filter_layout.setContentsMargins(0, 8, 0, 0)
         filter_layout.setSpacing(8)
 
-        self._parent_combo = ComboBox(filter_row)
-        self._parent_combo.setPlaceholderText("父 WorkUnit")
-        self._parent_combo.currentIndexChanged.connect(lambda _=0: self._apply_filters())
-        filter_layout.addWidget(self._parent_combo, 0)
-
         self._filter_edit = LineEdit(filter_row)
-        self._filter_edit.setPlaceholderText("过滤（支持角色名/路径关键字）")
+        self._filter_edit.setPlaceholderText("搜索 WorkUnit（支持关键字）")
         self._filter_edit.setClearButtonEnabled(True)
-        self._filter_edit.textChanged.connect(lambda _t="": self._apply_filters())
+        self._filter_edit.textChanged.connect(lambda _t="": self._schedule_apply_filters())
         filter_layout.addWidget(self._filter_edit, 1)
+
+        self._select_toggle_btn = PushButton(FluentIcon.ACCEPT, "全选", filter_row)
+        self._select_toggle_btn.clicked.connect(self._toggle_select_visible)
+        filter_layout.addWidget(self._select_toggle_btn, 0)
+
+        self._selected_count_label = CaptionLabel("已选 0", filter_row)
+        filter_layout.addWidget(self._selected_count_label, 0)
 
         self.viewLayout.addWidget(filter_row)
 
-        # 操作行：全选 / 取消全选 / 选中统计
-        action_row = QWidget(self)
-        action_layout = QHBoxLayout(action_row)
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
+        self._table = FluentTableView(self)
+        self._table.setModel(self._proxy_model)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setVisible(False)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        self._table.setSortingEnabled(False)
+        try:
+            self._table.setWordWrap(False)
+        except Exception:
+            pass
+        self.viewLayout.addWidget(self._table, 1)
 
-        self._select_toggle_btn = PushButton(FluentIcon.ACCEPT, "全选", action_row)
-        self._select_toggle_btn.clicked.connect(self._toggle_select_visible)
-        action_layout.addWidget(self._select_toggle_btn)
-
-        action_layout.addStretch(1)
-
-        self._selected_count_label = CaptionLabel("已选 0", action_row)
-        action_layout.addWidget(self._selected_count_label)
-
-        self.viewLayout.addWidget(action_row)
-
-        # 表头（更接近 table 的观感，但仍用 ListWidget 保持 Fluent 风格）
-        header = QWidget(self)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 0, 8, 0)
-        header_layout.setSpacing(10)
-
-        header_layout.addSpacing(26)  # 对齐复选框
-        header_layout.addWidget(CaptionLabel("WorkUnit", header), 1)
-        v = CaptionLabel("参考Voice", header)
-        v.setMinimumWidth(64)
-        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(v, 0)
-        c = CaptionLabel("Voice数", header)
-        c.setMinimumWidth(56)
-        c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(c, 0)
-        self.viewLayout.addWidget(header)
-
-        self._list = ListWidget(self)
-        self._list.setAlternatingRowColors(True)
-        self.viewLayout.addWidget(self._list, 1)
+        # 双击整行也能切换勾选（提升可用性）
+        try:
+            self._table.doubleClicked.connect(self._on_table_double_clicked)
+        except Exception:
+            pass
 
         self.widget.setMinimumWidth(760)
         self.widget.setMinimumHeight(520)
         self.yesButton.setText("导入选中")
         self.cancelButton.setText("取消")
 
-    def _populate(self):
-        self._list.clear()
-        self._rows.clear()
+        # 列宽：复选框列固定，其余列均分（更美观且随窗口自适应）
+        try:
+            header.setSectionResizeMode(_WorkUnitTableModel.COL_CHECK, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(_WorkUnitTableModel.COL_CHECK, 44)
+            header.setSectionResizeMode(_WorkUnitTableModel.COL_PATH, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(_WorkUnitTableModel.COL_HAS_VOICE, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(_WorkUnitTableModel.COL_VOICE_COUNT, QHeaderView.ResizeMode.Stretch)
+        except Exception:
+            pass
 
-        # 父 WorkUnit 列表
-        parents = sorted({p for p in (_get_top_parent_name(c) for c in self._all_candidates) if p})
-        self._parent_combo.clear()
-        self._parent_combo.addItem("全部")
-        if parents:
-            self._parent_combo.addItems(parents)
+        self._source_model.selectionChanged.connect(self._update_selected_count)
+        self._source_model.selectionChanged.connect(self._update_select_toggle_button)
 
-        # 默认父 WorkUnit：如果只存在一个父，则自动选中它；否则使用 default_parent；否则“全部”
-        target_parent = ""
-        if len(parents) == 1:
-            target_parent = parents[0]
-        elif self._default_parent and (self._default_parent in parents):
-            target_parent = self._default_parent
-
-        if target_parent:
-            try:
-                idx = self._parent_combo.findText(target_parent)
-                self._parent_combo.setCurrentIndex(idx)
-            except Exception:
-                self._parent_combo.setCurrentIndex(0)
-        else:
-            self._parent_combo.setCurrentIndex(0)
-
-        # 行
-        for c in self._all_candidates:
-            item = QListWidgetItem(self._list)
-            row = _WorkUnitRow(c, self._list)
-            try:
-                row.check.stateChanged.connect(lambda _=0: self._update_selected_count())
-            except Exception:
-                pass
-
-            item.setSizeHint(row.sizeHint())
-            self._list.addItem(item)
-            self._list.setItemWidget(item, row)
-            self._rows.append((c, item, row))
-
-        self._apply_filters()
-        self._update_selected_count()
-        self._update_select_toggle_button()
+    def _schedule_apply_filters(self):
+        """关键字输入防抖：避免大列表每个字符都全量刷新。"""
+        try:
+            self._filter_timer.start(180)
+        except Exception:
+            self._apply_filters()
 
     def _apply_filters(self):
         try:
-            parent_text = str(self._parent_combo.currentText() or "").strip()
-        except Exception:
-            parent_text = ""
-        try:
-            keyword = str(self._filter_edit.text() or "").strip().lower()
+            keyword = str(self._filter_edit.text() or "").strip()
         except Exception:
             keyword = ""
-
-        for c, item, _row in self._rows:
-            visible = True
-
-            if parent_text and parent_text != "全部":
-                top = _get_top_parent_name(c)
-                if top != parent_text:
-                    visible = False
-
-            if visible and keyword:
-                label = str(c.full_path or c.name or "").lower()
-                visible = keyword in label
-
-            try:
-                item.setHidden(not visible)
-            except Exception:
-                pass
-
+        self._proxy_model.set_keyword_filter(keyword)
         self._update_select_toggle_button()
+
+    def _on_table_double_clicked(self, proxy_index: QModelIndex):
+        if not proxy_index.isValid():
+            return
+        try:
+            src = self._proxy_model.mapToSource(proxy_index)
+        except Exception:
+            return
+        if not src.isValid():
+            return
+
+        check_index = self._source_model.index(src.row(), _WorkUnitTableModel.COL_CHECK)
+        try:
+            cur = self._source_model.data(check_index, Qt.ItemDataRole.CheckStateRole)
+            target = Qt.CheckState.Unchecked if cur == Qt.CheckState.Checked else Qt.CheckState.Checked
+            self._source_model.setData(check_index, target, Qt.ItemDataRole.CheckStateRole)
+        except Exception:
+            return
 
     def _toggle_select_visible(self):
         # 如果“可见项”全部已勾选 -> 取消全选；否则 -> 全选
-        visible_rows: list[_WorkUnitRow] = []
-        for _c, item, row in self._rows:
-            try:
-                if item.isHidden():
-                    continue
-            except Exception:
-                pass
-            visible_rows.append(row)
-
-        if not visible_rows:
+        visible_proxy_rows = self._proxy_model.rowCount()
+        if visible_proxy_rows <= 0:
             return
 
-        all_checked = True
-        for row in visible_rows:
-            try:
-                if not row.check.isChecked():
-                    all_checked = False
-                    break
-            except Exception:
-                all_checked = False
-                break
+        source_rows: list[int] = []
+        checked = 0
+        for r in range(visible_proxy_rows):
+            proxy_idx = self._proxy_model.index(r, _WorkUnitTableModel.COL_CHECK)
+            src_idx = self._proxy_model.mapToSource(proxy_idx)
+            if not src_idx.isValid():
+                continue
+            source_rows.append(src_idx.row())
 
-        self._set_check_for_visible(not all_checked)
+            try:
+                state = self._source_model.data(src_idx, Qt.ItemDataRole.CheckStateRole)
+                if state == Qt.CheckState.Checked:
+                    checked += 1
+            except Exception:
+                pass
+
+        all_checked = checked == len(source_rows)
+        self._source_model.set_checked_for_source_rows(source_rows, checked=not all_checked)
         self._update_select_toggle_button()
-
-    def _set_check_for_visible(self, checked: bool):
-        for _c, item, row in self._rows:
-            try:
-                if item.isHidden():
-                    continue
-            except Exception:
-                pass
-            try:
-                row.check.setChecked(bool(checked))
-            except Exception:
-                pass
-        self._update_selected_count()
 
     def _update_select_toggle_button(self):
         # 根据可见项状态更新“全选/取消全选”按钮
-        visible = 0
+        visible = self._proxy_model.rowCount()
         checked = 0
-        for _c, item, row in self._rows:
+        for r in range(visible):
+            proxy_idx = self._proxy_model.index(r, _WorkUnitTableModel.COL_CHECK)
+            src_idx = self._proxy_model.mapToSource(proxy_idx)
+            if not src_idx.isValid():
+                continue
             try:
-                if item.isHidden():
-                    continue
-            except Exception:
-                pass
-            visible += 1
-            try:
-                if row.check.isChecked():
+                if self._source_model.data(src_idx, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
                     checked += 1
             except Exception:
                 pass
@@ -317,14 +420,8 @@ class WwiseWorkUnitImportDialog(MessageBoxBase):
                 pass
 
     def _update_selected_count(self):
-        count = 0
-        total = len(self._rows)
-        for _c, _item, row in self._rows:
-            try:
-                if row.check.isChecked():
-                    count += 1
-            except Exception:
-                pass
+        count = self._source_model.selected_count()
+        total = self._source_model.total_count()
         try:
             self._selected_count_label.setText(f"已选 {count} / {total}")
         except Exception:
@@ -333,11 +430,4 @@ class WwiseWorkUnitImportDialog(MessageBoxBase):
         self._update_select_toggle_button()
 
     def get_selected_candidates(self) -> List[WorkUnitCandidate]:
-        selected: List[WorkUnitCandidate] = []
-        for c, _item, row in self._rows:
-            try:
-                if row.check.isChecked():
-                    selected.append(c)
-            except Exception:
-                continue
-        return selected
+        return self._source_model.get_selected_candidates()

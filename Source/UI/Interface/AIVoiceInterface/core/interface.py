@@ -38,10 +38,8 @@ from Source.UI.Interface.AIVoiceInterface.models.character_manager import Charac
 from Source.UI.Interface.AIVoiceInterface.dialogs.character_dialog import CharacterDialog
 from Source.UI.Interface.AIVoiceInterface.widgets.character_list_widget import CharacterListWidget
 from Source.UI.Interface.AIVoiceInterface.dialogs.batch_delete_characters_dialog import BatchDeleteCharactersDialog
-from Source.UI.Interface.AIVoiceInterface.widgets.audio_player_widget import (
-    ReferenceAudioPlayerWidget,
-    ResultAudioPlayerWidget,
-)
+from Source.UI.Interface.AIVoiceInterface.widgets.reference_audio_player_widget import ReferenceAudioPlayerWidget
+from Source.UI.Interface.AIVoiceInterface.widgets.result_audio_player_widget import ResultAudioPlayerWidget
 from Source.UI.Interface.AIVoiceInterface.windows.history_window import AIVoiceHistoryWindow
 
 # Import controller mixins

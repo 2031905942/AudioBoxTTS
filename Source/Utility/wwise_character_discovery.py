@@ -14,6 +14,7 @@ import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+import json
 from typing import Optional
 
 from Source.Utility.config_utility import config_utility, ProjectData
@@ -35,6 +36,10 @@ class WorkUnitCandidate:
     voice_count: int = 0
 
 
+class ScanCancelled(Exception):
+    """用于中断大项目扫描的取消异常。"""
+
+
 def _safe_text(elem: ET.Element | None) -> str:
     if elem is None or elem.text is None:
         return ""
@@ -53,6 +58,62 @@ def _parse_originals_dir_from_wproj(wwise_project_path: str) -> str:
         return "Originals"
 
 
+def _get_cache_path() -> str:
+    try:
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    except Exception:
+        repo_root = os.getcwd()
+    return os.path.join(repo_root, "temp_output", ".wwise_workunit_cache.json")
+
+
+def _load_cache() -> dict:
+    path = _get_cache_path()
+    try:
+        if not os.path.isfile(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    path = _get_cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _candidate_to_dict(c: WorkUnitCandidate) -> dict:
+    return {
+        "work_unit_id": c.work_unit_id,
+        "name": c.name,
+        "wwu_file_path": c.wwu_file_path,
+        "parent_work_unit_id": c.parent_work_unit_id,
+        "full_path": c.full_path,
+        "reference_voice_path": c.reference_voice_path,
+        "voice_count": int(c.voice_count or 0),
+    }
+
+
+def _candidate_from_dict(d: dict) -> WorkUnitCandidate:
+    return WorkUnitCandidate(
+        work_unit_id=str(d.get("work_unit_id") or ""),
+        name=str(d.get("name") or ""),
+        wwu_file_path=str(d.get("wwu_file_path") or ""),
+        parent_work_unit_id=str(d.get("parent_work_unit_id") or "") or None,
+        full_path=str(d.get("full_path") or "") or None,
+        reference_voice_path=str(d.get("reference_voice_path") or "") or None,
+        voice_count=int(d.get("voice_count") or 0),
+    )
+
+
 def _find_wwu_files(actor_mixer_dir: str) -> list[str]:
     wwu_files: list[str] = []
     for root, _dirs, files in os.walk(actor_mixer_dir):
@@ -63,37 +124,25 @@ def _find_wwu_files(actor_mixer_dir: str) -> list[str]:
     return wwu_files
 
 
-def _parse_work_unit_header(wwu_file_path: str) -> tuple[str | None, str | None, str | None]:
-    """从 .wwu 解析 WorkUnit 的 (id, name, parent_id)。
-
-    说明：通常每个 .wwu 对应一个 WorkUnit；这里取第一个 WorkUnit 元素作为该文件代表。
-    """
-    try:
-        root = ET.parse(wwu_file_path).getroot()
-    except Exception:
-        return None, None, None
-
-    work_unit = root.find(".//WorkUnit")
-    if work_unit is None:
-        return None, None, None
-
-    work_unit_id = str(work_unit.attrib.get("ID") or "").strip() or None
-    name = str(work_unit.attrib.get("Name") or "").strip() or None
-    parent_id = str(work_unit.attrib.get("ParentDocumentID") or "").strip() or None
-    return work_unit_id, name, parent_id
-
-
-def _collect_audio_paths_from_wwu(
+def _parse_wwu_work_unit_and_audio_pairs(
     wwu_file_path: str,
     *,
     wwise_project_dir: str,
     originals_dir: str,
-) -> list[tuple[str, str]]:
-    """收集 (language, abs_wav_path) 列表。"""
+) -> tuple[str | None, str | None, str | None, list[tuple[str, str]]]:
+    """一次解析 .wwu：返回 (work_unit_id, name, parent_id, audio_pairs)。"""
     try:
         root = ET.parse(wwu_file_path).getroot()
     except Exception:
-        return []
+        return None, None, None, []
+
+    work_unit = root.find(".//WorkUnit")
+    if work_unit is None:
+        return None, None, None, []
+
+    work_unit_id = str(work_unit.attrib.get("ID") or "").strip() or None
+    name = str(work_unit.attrib.get("Name") or "").strip() or None
+    parent_id = str(work_unit.attrib.get("ParentDocumentID") or "").strip() or None
 
     results: list[tuple[str, str]] = []
     for audio_file_source in root.findall(".//AudioFileSource"):
@@ -112,7 +161,22 @@ def _collect_audio_paths_from_wwu(
         if os.path.isfile(abs_path_str):
             results.append((lang or "", abs_path_str))
 
-    return results
+    return work_unit_id, name, parent_id, results
+
+
+def _collect_audio_paths_from_wwu(
+    wwu_file_path: str,
+    *,
+    wwise_project_dir: str,
+    originals_dir: str,
+) -> list[tuple[str, str]]:
+    """兼容旧逻辑：收集 (language, abs_wav_path) 列表。"""
+    _wid, _name, _pid, pairs = _parse_wwu_work_unit_and_audio_pairs(
+        wwu_file_path,
+        wwise_project_dir=wwise_project_dir,
+        originals_dir=originals_dir,
+    )
+    return pairs
 
 
 def _pick_reference_voice(audio_pairs: list[tuple[str, str]]) -> str | None:
@@ -154,8 +218,19 @@ def _build_full_path(work_unit_id: str, id_to_candidate: dict[str, WorkUnitCandi
     return " / ".join(parts)
 
 
-def discover_leaf_work_units_from_project(project_id: str) -> list[WorkUnitCandidate]:
-    """从项目的 Actor-Mixer Hierarchy 里发现“叶子 WorkUnit”候选。"""
+def discover_leaf_work_units_from_project(
+    project_id: str,
+    *,
+    progress_cb=None,
+    is_cancelled=None,
+) -> list[WorkUnitCandidate]:
+    """从项目的 Actor-Mixer Hierarchy 里发现“叶子 WorkUnit”候选。
+
+    Args:
+        project_id: 项目ID
+        progress_cb: 进度回调 (current:int, total:int, text:str)
+        is_cancelled: 取消检查回调 ()->bool
+    """
     project_data = config_utility.get_project_data(project_id)
     if not project_data:
         raise ValueError(f"项目ID无效: {project_id}")
@@ -172,22 +247,66 @@ def discover_leaf_work_units_from_project(project_id: str) -> list[WorkUnitCandi
     if not os.path.isdir(actor_mixer_dir):
         return []
 
+    # 缓存：根据 wproj 与 Actor-Mixer 目录 mtime 判定是否可复用
+    cache_key = f"{wwise_project_path}|{actor_mixer_dir}"
+    try:
+        wproj_mtime = os.path.getmtime(wwise_project_path)
+    except Exception:
+        wproj_mtime = 0.0
+    try:
+        actor_mixer_mtime = os.path.getmtime(actor_mixer_dir)
+    except Exception:
+        actor_mixer_mtime = 0.0
+
+    cache = _load_cache()
+    entry = cache.get(cache_key) if isinstance(cache, dict) else None
+    if isinstance(entry, dict):
+        try:
+            if (
+                float(entry.get("wproj_mtime", 0.0)) == float(wproj_mtime)
+                and float(entry.get("actor_mixer_mtime", 0.0)) == float(actor_mixer_mtime)
+            ):
+                data = entry.get("candidates") or []
+                if isinstance(data, list) and data:
+                    try:
+                        if callable(progress_cb):
+                            progress_cb(1, 1, "已从缓存加载")
+                    except Exception:
+                        pass
+                    return [_candidate_from_dict(d) for d in data]
+        except Exception:
+            pass
+
     originals_dir = _parse_originals_dir_from_wproj(wwise_project_path)
 
     raw: list[WorkUnitCandidate] = []
     id_to_wwu: dict[str, str] = {}
     parent_ids: set[str] = set()
 
-    for wwu in _find_wwu_files(actor_mixer_dir):
-        wid, name, parent_id = _parse_work_unit_header(wwu)
-        if not wid or not name:
-            continue
+    wwu_files = _find_wwu_files(actor_mixer_dir)
+    total = len(wwu_files)
+    for idx, wwu in enumerate(wwu_files):
+        try:
+            if callable(is_cancelled) and bool(is_cancelled()):
+                raise ScanCancelled()
+        except ScanCancelled:
+            raise
+        except Exception:
+            pass
 
-        audio_pairs = _collect_audio_paths_from_wwu(
+        try:
+            if callable(progress_cb):
+                progress_cb(int(idx), int(total), f"解析: {os.path.basename(wwu)}")
+        except Exception:
+            pass
+
+        wid, name, parent_id, audio_pairs = _parse_wwu_work_unit_and_audio_pairs(
             wwu,
             wwise_project_dir=wwise_project_dir,
             originals_dir=originals_dir,
         )
+        if not wid or not name:
+            continue
 
         voice_pairs = [(lang, p) for (lang, p) in audio_pairs if (lang or "").upper() != "SFX"]
 
@@ -229,5 +348,22 @@ def discover_leaf_work_units_from_project(project_id: str) -> list[WorkUnitCandi
         )
 
     enriched.sort(key=lambda x: (x.full_path or x.name, x.name))
+
+    try:
+        if callable(progress_cb):
+            progress_cb(int(total), int(total), f"发现 {len(enriched)} 个候选")
+    except Exception:
+        pass
+
+    try:
+        cache[cache_key] = {
+            "wproj_mtime": float(wproj_mtime),
+            "actor_mixer_mtime": float(actor_mixer_mtime),
+            "candidates": [_candidate_to_dict(c) for c in enriched],
+        }
+        _save_cache(cache)
+    except Exception:
+        pass
+
     return enriched
 
