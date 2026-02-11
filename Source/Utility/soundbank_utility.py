@@ -20,6 +20,23 @@ class SoundbankUtility(WprojUtility, FileUtility):
     def __init__(self, job):
         super().__init__(job)
         self.sync_count = 0
+        self._sync_task_dest_path_to_rel: dict[str, str] = {}
+        self._updated_rel_path_list: list[str] = []
+        self._copied_rel_path_list: list[str] = []
+        self._deleted_rel_path_list: list[str] = []
+
+    @staticmethod
+    def _format_path_list(title: str, path_list: list[str], limit: int = 50) -> str:
+        if not path_list:
+            return f"{title}: （无）"
+
+        shown = path_list[:limit]
+        remaining = len(path_list) - len(shown)
+        lines = [f"{title}: ({len(path_list)})"]
+        lines.extend([f"- {p}" for p in shown])
+        if remaining > 0:
+            lines.append(f"... 以及 {remaining} 项未显示")
+        return "\n".join(lines)
 
     def sync_soundbank_job(self, project_id: str):
         result, _, _, _ = self.clean_generated_soundbanks_dir(project_id)
@@ -88,6 +105,11 @@ class SoundbankUtility(WprojUtility, FileUtility):
         delete_file_set = unity_soundbank_dir_file_path_set - generated_soundbank_dir_file_path_set
         sync_file_set = generated_soundbank_dir_file_path_set & unity_soundbank_dir_file_path_set
 
+        self._sync_task_dest_path_to_rel.clear()
+        self._updated_rel_path_list.clear()
+        self._copied_rel_path_list = sorted(new_file_set)
+        self._deleted_rel_path_list = sorted(delete_file_set)
+
         total_file_count = len(new_file_set) + len(delete_file_set) + len(sync_file_set)
         self.total_task_count = total_file_count
         self.completed_task_count = 0
@@ -113,7 +135,9 @@ class SoundbankUtility(WprojUtility, FileUtility):
             if pathlib.Path(sync_file).suffix == ".wwopus":
                 new_wwopus_file = sync_file[sync_file.index("ExternalSource/"):]
                 source_path = f"{generated_soundbank_dir_path}/{new_wwopus_file}"
-            task = FileSyncTask(self, source_path, f"{unity_soundbank_dir_path}/{sync_file}")
+            dest_path = f"{unity_soundbank_dir_path}/{sync_file}"
+            self._sync_task_dest_path_to_rel[dest_path] = sync_file
+            task = FileSyncTask(self, source_path, dest_path)
             self.active_task_list.append(task)
 
         for delete_file in delete_file_set:
@@ -124,20 +148,25 @@ class SoundbankUtility(WprojUtility, FileUtility):
         def __on_all_task_finished():
             self.remove_empty_directory(unity_soundbank_dir_path)
 
-            result_content_str: str = f"同步声音库完成"
-            if copy_file_count > 0:
-                result_content_str += f"\n复制了{copy_file_count}个文件"
+            copied_list = sorted(self._copied_rel_path_list)
+            updated_list = sorted(set(self._updated_rel_path_list))
+            deleted_list = sorted(self._deleted_rel_path_list)
 
-            if self.sync_count > 0:
-                result_content_str += f"\n同步了{self.sync_count}个文件"
+            summary = f"同步声音库完成（新增 {len(copied_list)} / 更新 {len(updated_list)} / 删除 {len(deleted_list)}）"
+            if len(copied_list) == 0 and len(updated_list) == 0 and len(deleted_list) == 0:
+                summary = "同步声音库完成（没有变动）"
 
-            if delete_file_count > 0:
-                result_content_str += f"\n删除了{delete_file_count}个文件"
+            detail_parts: list[str] = [
+                summary,
+                "",
+                self._format_path_list("新增文件", copied_list),
+                "",
+                self._format_path_list("更新文件", updated_list),
+                "",
+                self._format_path_list("删除文件", deleted_list),
+            ]
 
-            if copy_file_count == 0 and self.sync_count == 0 and delete_file_count == 0:
-                result_content_str += f"\n没有变动"
-
-            self.finish_signal.emit("结果", result_content_str, "success")
+            self.finish_signal.emit("结果", "\n".join(detail_parts), "success")
 
         self.on_all_task_finished = __on_all_task_finished
 
@@ -148,6 +177,11 @@ class SoundbankUtility(WprojUtility, FileUtility):
             is_same = data.get("is_same")
             if is_same is False:
                 self.sync_count += 1
+                dest_path = data.get("dest_path")
+                if dest_path:
+                    rel = self._sync_task_dest_path_to_rel.get(dest_path)
+                    if rel:
+                        self._updated_rel_path_list.append(rel)
 
     def clean_generated_soundbanks_dir_job(self, project_id: str):
         result, delete_file_count, has_json_modified, has_xml_modified = self.clean_generated_soundbanks_dir(project_id)

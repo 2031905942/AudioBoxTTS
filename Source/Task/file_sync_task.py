@@ -30,7 +30,9 @@ class FileSyncTask(BaseTask):
             if is_same:
                 self.signals.progress.emit(100)
                 self.signals.finished.emit({
-                    "is_same": True
+                    "is_same": True,
+                    "src_path": self.src_path,
+                    "dest_path": self.dest_path,
                 })
                 return
             else:
@@ -52,7 +54,9 @@ class FileSyncTask(BaseTask):
                         progress = int((copied / total_size) * 100)
                         self.signals.progress.emit(progress)
                 self.signals.finished.emit({
-                    "is_same": False
+                    "is_same": False,
+                    "src_path": self.src_path,
+                    "dest_path": self.dest_path,
                 })
         except Exception as exception:
             self.signals.error.emit({

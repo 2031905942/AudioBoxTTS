@@ -14,6 +14,7 @@ class SoundBankJob(BaseJob):
     def __init__(self, main_window):
         super().__init__(main_window)
         self._soundbank_utility: SoundbankUtility | None = None
+        self._last_report_dialog = None
 
     def sync_soundbank_action(self, project_id: str):
         unity_soundbank_dir_path: str | None = config_utility.get_config(ProjectData.UNITY_WWISE_BANK_PATH, project_id)
@@ -47,7 +48,31 @@ class SoundBankJob(BaseJob):
         if self._soundbank_utility:
             self._soundbank_utility.deleteLater()
             self._soundbank_utility = None
-        super().job_finish(title, content, result)
+
+        # 进度窗关闭 & 解除主窗禁用（复用 BaseJob 行为）
+        self.delete_progress_window()
+        self.main_window.setDisabled(False)
+
+        # InfoBar 内容保持简短；同步声音库则额外弹出详细报告窗口
+        summary = content
+        if isinstance(content, str) and "\n" in content:
+            summary = content.splitlines()[0]
+
+        self.show_result_info_bar(result, title, summary)
+
+        if result == "success" and isinstance(content, str) and content.startswith("同步声音库完成"):
+            try:
+                from Source.UI.Basic.text_report_dialog import TextReportDialog
+
+                dlg = TextReportDialog(self.main_window, "同步声音库 - 变更明细", content)
+                dlg.show()
+                dlg.raise_()
+                self._last_report_dialog = dlg
+            except Exception:
+                # 回退：至少保证有摘要提示
+                pass
+
+        self.main_window.raise_()
 
     def _create_utility(self):
         self._soundbank_utility: SoundbankUtility = SoundbankUtility(self)

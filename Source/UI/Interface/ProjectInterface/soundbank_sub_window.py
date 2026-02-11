@@ -88,6 +88,20 @@ class SoundbankSubWindow(QFrame):
         self._sync_soundbank_button = PushButton(self)
         self._sync_soundbank_button.setText("同步声音库")
         self._sync_soundbank_button.setIcon(FluentIcon.SYNC)
+        self._sync_soundbank_button.setToolTip(
+            "同步声音库（文件同步）\n"
+            "将 Wwise 工程 GeneratedSoundBanks 与 Unity 声音库目录进行对比，并执行：\n"
+            "• 复制新增文件\n"
+            "• 覆盖更新内容不同的文件\n"
+            "• 删除 Unity 目录中多余文件\n"
+            "• 清理空目录\n"
+            "\n"
+            "范围可能包含：.bnk/.wem、SoundbanksInfo/PlatformInfo/PluginInfo（json/xml）、\n"
+            "Wwise 2022+ 的 Media/（streamed media）、勾选语言的 <language>/ 与 Media/<language>、\n"
+            "以及 ExternalSource 下的 .wwopus。\n"
+            "\n"
+            "注意：本操作不会在 Wwise 中生成 SoundBank，只同步已有产物。"
+        )
         self._sync_soundbank_button.clicked.connect(lambda: self._soundbank_job.sync_soundbank_action(self.project_id))
         self.vbox_layout.addWidget(self._sync_soundbank_button)
 
