@@ -138,6 +138,10 @@ class TitleBar(MSFluentTitleBar):
         sample_import_action.triggered.connect(self._main_window.wproj_job.sample_import_action)
         wwise_project_job_menu.addAction(sample_import_action)
 
+        named_audio_import_action = Action(FluentIcon.FOLDER_ADD, "按命名导入(Actor-Mixer)")
+        named_audio_import_action.triggered.connect(self._main_window.wproj_job.named_audio_folder_import_action)
+        wwise_project_job_menu.addAction(named_audio_import_action)
+
         split_work_unit_action = Action(FluentIcon.DICTIONARY_ADD, "拆分工作单元")
         split_work_unit_action.triggered.connect(self._main_window.wproj_job.split_work_unit_action)
         wwise_project_job_menu.addAction(split_work_unit_action)

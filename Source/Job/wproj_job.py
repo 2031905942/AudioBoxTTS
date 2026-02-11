@@ -8,7 +8,7 @@ from typing import Optional
 from lxml.etree import Element
 from PySide6.QtCore import QStandardPaths, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QFileDialog, QInputDialog
 
 import main
 from Source.Job.base_job import BaseJob
@@ -42,6 +42,8 @@ class WprojJob(BaseJob):
     _validate_sample_name_for_import_signal = Signal(str)
     _validate_example_actor_mixer_for_import_signal = Signal(str)
     _import_sample_signal = Signal(dict)
+
+    _import_named_audio_folder_signal = Signal(dict)
 
     _split_work_unit_signal = Signal()
 
@@ -240,6 +242,12 @@ class WprojJob(BaseJob):
         if not self._validate_wwise_project_require_open_action():
             self._validate_wwise_project_succeeded_signal.disconnect()
 
+    def named_audio_folder_import_action(self):
+        """按文件名分词创建 Actor-Mixer 层级并导入 wav（偏 UI/SFX 场景）。"""
+        self._validate_wwise_project_succeeded_signal.connect(self._named_audio_folder_import_prepare_action)
+        if not self._validate_wwise_project_require_open_action():
+            self._validate_wwise_project_succeeded_signal.disconnect()
+
     def _validate_sample_name_for_import_action(self, project_id: str):
         self._validate_wwise_project_succeeded_signal.disconnect()
         wproj_utility.CUSTOM_IMPORT_CHARACTER_TYPE_DICT = self._waapi_utility.get_custom_auto_import_sample_type_dict()
@@ -268,6 +276,93 @@ class WprojJob(BaseJob):
         self.start_worker()
         self._create_progress_ring_window()
         self._validate_sample_name_for_import_signal.emit(dir_path)
+
+    def _named_audio_folder_import_prepare_action(self, project_id: str):
+        self._validate_wwise_project_succeeded_signal.disconnect()
+
+        dir_dialog = QFileDialog(self.main_window)
+        dir_dialog.setWindowTitle("请选择要按命名导入的音频目录")
+        dir_dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dir_dialog.setViewMode(QFileDialog.ViewMode.List)
+        last_selected = config_utility.get_config(WprojJob._LAST_SELECTED_IMPORT_SAMPLE_DIR_PATH_CONFIG_NAME, project_id)
+        if last_selected and os.path.isdir(last_selected):
+            set_directory = last_selected
+        else:
+            set_directory = QStandardPaths.standardLocations(QStandardPaths.StandardLocation.DownloadLocation)[0]
+        dir_dialog.setDirectory(set_directory)
+
+        dir_path = ""
+        if dir_dialog.exec():
+            dir_path = dir_dialog.selectedFiles()[0]
+        if not dir_path:
+            self.job_finish("结果", "任务中止", "warning")
+            return
+
+        depth, ok = QInputDialog.getInt(self.main_window, "层级深度", "使用文件名前 N 个词作为层级（不足则用除最后词外所有）", 3, 1, 10, 1)
+        if not ok:
+            self.job_finish("结果", "任务中止", "warning")
+            return
+
+        create_events_item, ok = QInputDialog.getItem(
+            self.main_window,
+            "创建 Events",
+            "是否为每个音频自动创建 Event（并指向对应 Sound）？",
+            ["是", "否"],
+            0,
+            False,
+        )
+        if not ok:
+            self.job_finish("结果", "任务中止", "warning")
+            return
+        create_events = str(create_events_item) == "是"
+
+        create_soundbanks_item, ok = QInputDialog.getItem(
+            self.main_window,
+            "创建 SoundBanks",
+            "是否自动创建/更新 SoundBank，并把对应 Events 目录加入 Inclusions？",
+            ["否", "是"],
+            0,
+            False,
+        )
+        if not ok:
+            self.job_finish("结果", "任务中止", "warning")
+            return
+        create_soundbanks = str(create_soundbanks_item) == "是"
+
+        soundbank_key_depth = 1
+        if create_soundbanks:
+            soundbank_key_depth, ok = QInputDialog.getInt(
+                self.main_window,
+                "SoundBank 粒度",
+                "取文件名前 N 个词作为 Bank 名（1=UI；2=UI_Activity...）",
+                1,
+                1,
+                6,
+                1,
+            )
+            if not ok:
+                self.job_finish("结果", "任务中止", "warning")
+                return
+
+        # 记录目录父路径，保持和“素材入库”一致的体验
+        config_utility.set_config(WprojJob._LAST_SELECTED_IMPORT_SAMPLE_DIR_PATH_CONFIG_NAME, os.path.dirname(dir_path), project_id)
+
+        self._waapi_utility.moveToThread(self.worker_thread)
+        self.start_worker()
+        self._create_progress_bar_window()
+        parameter_dict = {
+            "dir_path": dir_path,
+            "folder_depth": int(depth),
+            "root_path": "Actor-Mixer Hierarchy",
+            "split_mode": "space_or_underscore",
+            "create_events": bool(create_events),
+            "events_root_path": "Events",
+            "event_name_mode": "full",
+            "create_soundbanks": bool(create_soundbanks),
+            "soundbanks_root_path": "SoundBanks",
+            "soundbank_key_depth": int(soundbank_key_depth),
+        }
+        self._import_named_audio_folder_signal.emit(parameter_dict)
 
     def _validate_example_actor_mixer_for_import_action(self, dir_path: str):
         self._waapi_utility.moveToThread(self.worker_thread)
@@ -486,6 +581,7 @@ class WprojJob(BaseJob):
 
         self._validate_example_actor_mixer_for_import_signal.connect(self._waapi_utility.validate_for_import_job)
         self._import_sample_signal.connect(self._waapi_utility.import_sample_job)
+        self._import_named_audio_folder_signal.connect(self._waapi_utility.import_named_audio_folder_job)
         self._split_work_unit_signal.connect(self._waapi_utility.split_work_unit_job)
         self._select_sound_object_within_text_signal.connect(self._waapi_utility.select_sound_object_within_text_job)
 

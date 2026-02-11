@@ -258,6 +258,318 @@ class WaapiUtility(VoiceExcelUtility):
             self.validate_for_import_succeeded_signal.emit(dir_path, has_voice_sample)
             self.show_result_info_bar_signal.emit("success", "结果", "验证Wwise入库条件成功")
 
+    def import_named_audio_folder_job(self, parameter: dict):
+        """按文件名分词自动创建 Actor-Mixer 层级并导入 wav。
+
+        目标场景：例如文件名 `UI Activity Event400MatchPopUp In.wav`
+        - 自动创建：Actor-Mixer Hierarchy/UI/Activity/Event400MatchPopUp
+        - 在该节点下创建 Sound：`UI Activity Event400MatchPopUp In`
+
+        参数：
+            dir_path: 待导入文件夹
+            folder_depth: 使用前 N 个 token 作为层级（默认 3；不足则用“除最后 token 外所有”）
+            root_path: Actor-Mixer 根路径（默认 `Actor-Mixer Hierarchy`）
+            split_mode: `space` 或 `space_or_underscore`（默认）
+
+            create_events: 是否自动创建 Events（默认 True）
+            events_root_path: Events 根路径（默认 `Events`）
+            event_name_mode: `full`(默认，完整文件名) 或 `drop_last_token`（丢弃最后一个 token）
+
+            create_soundbanks: 是否自动创建/更新 SoundBanks（默认 False）
+            soundbanks_root_path: SoundBanks 根路径（默认 `SoundBanks`）
+            soundbank_key_depth: 取前 N 个 token 作为 bank key（默认 1，例如 UI；2 则 UI_Activity）
+
+            hierarchy_node_type: 用于层级节点的 Wwise 对象类型（默认 `ActorMixer`；可选 `Folder`）
+        """
+        dir_path: str = str(parameter.get("dir_path") or "")
+        if not dir_path:
+            self.finish_signal.emit("结果", "任务中止，素材目录为空", "error")
+            return
+
+        root_path: str = str(parameter.get("root_path") or ACTOR_MIXER_HIERARCHY).strip() or ACTOR_MIXER_HIERARCHY
+        folder_depth: int = int(parameter.get("folder_depth") or 3)
+        if folder_depth < 1:
+            folder_depth = 1
+
+        split_mode: str = str(parameter.get("split_mode") or "space_or_underscore").strip().lower()
+
+        create_events: bool = bool(parameter.get("create_events", True))
+        events_root_path: str = str(parameter.get("events_root_path") or EVENTS).strip() or EVENTS
+        event_name_mode: str = str(parameter.get("event_name_mode") or "full").strip().lower()
+
+        create_soundbanks: bool = bool(parameter.get("create_soundbanks", False))
+        soundbanks_root_path: str = str(parameter.get("soundbanks_root_path") or SOUNDBANKS).strip() or SOUNDBANKS
+        soundbank_key_depth: int = int(parameter.get("soundbank_key_depth") or 1)
+        if soundbank_key_depth < 1:
+            soundbank_key_depth = 1
+
+        hierarchy_node_type: str = str(parameter.get("hierarchy_node_type") or "ActorMixer").strip() or "ActorMixer"
+        if hierarchy_node_type not in ("ActorMixer", "Folder"):
+            hierarchy_node_type = "ActorMixer"
+
+        self.update_progress_text_signal.emit("收集素材...")
+        sample_path_list = self.get_files(dir_path, [".wav"])
+        total_count = len(sample_path_list)
+        self.update_progress_total_count_signal.emit(total_count)
+
+        if total_count == 0:
+            self.finish_signal.emit("结果", "未找到任何 wav 文件", "warning")
+            return
+
+        if not self.is_connected():
+            if not self.connect_waapi():
+                self.finish_signal.emit("结果", "Waapi 未连接，请先打开 Wwise 并启用 WAAPI", "error")
+                return
+
+        root_result = self._get_wwise_object(f'"{root_path}"')
+        if not root_result:
+            self.finish_signal.emit("结果", f"找不到根路径: {root_path}", "error")
+            return
+        root_id = root_result[0]["id"]
+
+        events_root_id: str | None = None
+        if create_events:
+            ev_root = self._get_wwise_object(f'"{events_root_path}"')
+            if not ev_root:
+                self.finish_signal.emit("结果", f"找不到 Events 根路径: {events_root_path}", "error")
+                return
+            events_root_id = ev_root[0]["id"]
+
+        soundbanks_root_id: str | None = None
+        if create_soundbanks:
+            sb_root = self._get_wwise_object(f'"{soundbanks_root_path}"')
+            if not sb_root:
+                self.finish_signal.emit("结果", f"找不到 SoundBanks 根路径: {soundbanks_root_path}", "error")
+                return
+            soundbanks_root_id = sb_root[0]["id"]
+
+        default_soundbanks_workunit_id: str | None = None
+        if create_soundbanks and soundbanks_root_id:
+            default_wu = self._get_wwise_object(f'"{soundbanks_root_path}/Default Work Unit"')
+            if default_wu and default_wu[0].get("type") == "WorkUnit":
+                default_soundbanks_workunit_id = default_wu[0]["id"]
+
+        # originalsSubFolder 期望相对 Originals/SFX 的路径；这里使用 Actor-Mixer 路径相对 Actor-Mixer Hierarchy 的部分
+        root_rel = ""
+        if root_path == ACTOR_MIXER_HIERARCHY:
+            root_rel = ""
+        elif root_path.startswith(f"{ACTOR_MIXER_HIERARCHY}/"):
+            root_rel = root_path[len(f"{ACTOR_MIXER_HIERARCHY}/"):]
+
+        current_count = 0
+        imported_count = 0
+        skipped_count = 0
+
+        # 缓存：避免重复查找/创建相同的 Event WorkUnit / SoundBank
+        event_workunit_id_cache: dict[str, str] = {}
+        soundbank_id_cache: dict[str, str] = {}
+
+        for sample_path in sample_path_list:
+            if self.cancel_job:
+                break
+
+            file_name = os.path.basename(sample_path)
+            file_name_stem = Path(sample_path).stem
+            self.update_progress_text_signal.emit(f"导入...\n\"{file_name}\"")
+
+            token_source = file_name_stem
+            if split_mode == "space_or_underscore" and " " not in token_source and "_" in token_source:
+                token_source = token_source.replace("_", " ")
+
+            tokens = [t for t in (token_source.split() if token_source else []) if t]
+            if len(tokens) < 2:
+                skipped_count += 1
+                current_count += 1
+                self.update_progress_current_count_signal.emit(current_count)
+                continue
+
+            # 计算层级：优先取前 folder_depth 个 token；若 token 数不足，则用“除最后 token 外”作为层级
+            if len(tokens) <= folder_depth:
+                folder_parts = tokens[:-1]
+            else:
+                folder_parts = tokens[:folder_depth]
+
+            # Sound 名称：始终使用完整 stem（保留空格）
+            sound_name = file_name_stem
+
+            # 分类 key：用于 Events / SoundBanks
+            category = str(tokens[0])
+            bank_key_parts = tokens[: min(len(tokens), soundbank_key_depth)]
+            bank_key = "_".join(bank_key_parts).strip("_")
+            if not bank_key:
+                bank_key = category
+
+            # 处理非 Windows 的路径映射（沿用现有导入逻辑）
+            normalized_sample_path = sample_path
+            if not main.is_windows_os():
+                user_path_prefix = os.path.expanduser('~')
+                if normalized_sample_path.startswith(user_path_prefix):
+                    normalized_sample_path = f"Y:{normalized_sample_path[len(user_path_prefix):]}"
+                else:
+                    normalized_sample_path = f"Z:{normalized_sample_path}"
+            normalized_sample_path = normalized_sample_path.replace("/", "\\")
+
+            # 逐级确保 Folder 存在
+            # 适配常见 UI 工程结构：Actor-Mixer Hierarchy/UI(WorkUnit)/UI(ActorMixer)/...
+            parent_id = root_id
+            parent_path = root_path
+            category_consumed = False
+            if root_path == ACTOR_MIXER_HIERARCHY and category:
+                anchor = self._get_wwise_object(f'"{ACTOR_MIXER_HIERARCHY}/{category}/{category}"')
+                if anchor and anchor[0].get("type") == "ActorMixer":
+                    parent_id = anchor[0]["id"]
+                    parent_path = f"{ACTOR_MIXER_HIERARCHY}/{category}/{category}"
+                    category_consumed = True
+
+            # 计算层级：保持 folder_depth 的语义（默认包含 category），但在锚点已消费 category 时从层级中剔除
+            if len(tokens) <= folder_depth:
+                hierarchy_tokens = tokens[:-1]
+            else:
+                hierarchy_tokens = tokens[:folder_depth]
+            if category_consumed and hierarchy_tokens and hierarchy_tokens[0] == category:
+                hierarchy_tokens = hierarchy_tokens[1:]
+
+            # 注意：如果没有锚点（未消费 category），hierarchy_tokens 仍会包含 category，从而会创建 UI/Activity/... 这种结构
+            for part in hierarchy_tokens:
+                next_path = f"{parent_path}/{part}"
+                result = self._get_wwise_object(f'"{next_path}"')
+                if result:
+                    parent_id = result[0]["id"]
+                    parent_path = next_path
+                    continue
+
+                created = self._create_wwise_object(parent_id, hierarchy_node_type, part, {"onNameConflict": "merge"})
+                if not created:
+                    parent_id = ""
+                    break
+                parent_id = created["id"]
+                parent_path = next_path
+
+            if not parent_id:
+                skipped_count += 1
+                current_count += 1
+                self.update_progress_current_count_signal.emit(current_count)
+                continue
+
+            # 确保 Sound 存在
+            sound_path = f"{parent_path}/{sound_name}"
+            result = self._get_wwise_object(f'"{sound_path}"', ["@IsVoice"])
+            if result:
+                if result[0]["type"] != "Sound":
+                    skipped_count += 1
+                    current_count += 1
+                    self.update_progress_current_count_signal.emit(current_count)
+                    continue
+                sound_id = result[0]["id"]
+            else:
+                created = self._create_wwise_object(parent_id, "Sound", sound_name, {"@IsVoice": False})
+                if not created:
+                    skipped_count += 1
+                    current_count += 1
+                    self.update_progress_current_count_signal.emit(current_count)
+                    continue
+                sound_id = created["id"]
+
+            # originalsSubFolder：尽量保持与原先结构一致（含 category）
+            root_rel_parts = [p for p in (root_rel.split("/") if root_rel else []) if p]
+            import_parts: list[str] = list(root_rel_parts)
+            if category:
+                if len(import_parts) == 0 or import_parts[-1] != category:
+                    import_parts.append(category)
+            import_parts.extend([p for p in hierarchy_tokens if p and p != category])
+            import_path = "/".join([p for p in import_parts if p])
+            self._import_audio(f"<AudioFileSource>{sound_name}", normalized_sample_path, root=sound_id, import_path=import_path)
+
+            # Events：创建同名 Event，并指向该 Sound
+            if create_events and events_root_id:
+                # 1) 事件 WorkUnit：Events/<Category>
+                if category in event_workunit_id_cache:
+                    category_workunit_id = event_workunit_id_cache[category]
+                else:
+                    created = self._create_wwise_object(events_root_id, "WorkUnit", category, {"onNameConflict": "merge"})
+                    category_workunit_id = created["id"] if created else ""
+                    if not category_workunit_id:
+                        category_workunit_id = events_root_id
+                    event_workunit_id_cache[category] = category_workunit_id
+
+                # 2) 事件 Folder：复用与 Actor-Mixer 相同的 folder_parts（跳过第一个 token，因为它已经作为 WorkUnit）
+                event_folder_parent_id = category_workunit_id
+                # 使用 hierarchy_tokens（已按锚点调整过），并避免把 category 再放进 Folder
+                for folder_name in [p for p in hierarchy_tokens if p and p != category]:
+                    created = self._create_wwise_object(event_folder_parent_id, "Folder", folder_name, {"onNameConflict": "merge"})
+                    if not created:
+                        break
+                    event_folder_parent_id = created["id"]
+
+                # 3) Event 名称
+                if event_name_mode == "drop_last_token" and len(tokens) >= 2:
+                    event_base = " ".join(tokens[:-1])
+                else:
+                    event_base = sound_name
+                event_name = event_base.replace(" ", "_")
+
+                # 4) 创建/移动/更新 Action
+                result = self._get_wwise_object(f'where name = "{event_name}" and type = "Event"')
+                if result:
+                    event_id = result[0]["id"]
+                    if result[0]["parent"]["id"] != event_folder_parent_id:
+                        self._move_wwise_object(event_id, event_folder_parent_id)
+                    children = self._get_wwise_object(f'"{event_id}" select children')
+                    if not children:
+                        self._create_wwise_object(event_id, "Action", "", {"@ActionType": 1, "@Target": sound_id})
+                    else:
+                        action_id = children[0]["id"]
+                        self._set_wwise_object_property(action_id, "ActionType", 1)
+                        self._set_wwise_object_reference(action_id, "Target", sound_id)
+                else:
+                    self._create_wwise_object(
+                        event_folder_parent_id,
+                        "Event",
+                        event_name,
+                        {
+                            "children": [
+                                {
+                                    "type": "Action",
+                                    "name": "",
+                                    "@ActionType": 1,
+                                    "@Target": sound_id,
+                                }
+                            ]
+                        },
+                    )
+
+                # 5) SoundBanks：为 bank_key 创建 SoundBank，并确保包含 Events/<Category>
+                if create_soundbanks and soundbanks_root_id:
+                    if bank_key in soundbank_id_cache:
+                        bank_id = soundbank_id_cache[bank_key]
+                    else:
+                        bank_name = bank_key
+                        existing = self._get_wwise_object(f'where name = "{bank_name}" and type = "SoundBank"')
+                        if existing:
+                            bank_id = existing[0]["id"]
+                        else:
+                            # 适配你的工程：优先放在 SoundBanks/Default Work Unit 下；找不到则放在根下
+                            parent_for_new_bank = default_soundbanks_workunit_id or soundbanks_root_id
+                            created_sb = self._create_wwise_object(parent_for_new_bank, "SoundBank", bank_name)
+                            bank_id = created_sb["id"] if created_sb else ""
+                        if bank_id:
+                            soundbank_id_cache[bank_key] = bank_id
+
+                            inclusions = {
+                                "object": category_workunit_id,
+                                "filter": ["events", "structures", "media"],
+                            }
+                            self._set_soundbank_inclusions(bank_id, [inclusions], "add")
+
+            imported_count += 1
+            current_count += 1
+            self.update_progress_current_count_signal.emit(current_count)
+
+        if self.cancel_job:
+            self.finish_signal.emit("结果", f"任务已取消：成功导入 {imported_count} 个，跳过 {skipped_count} 个", "warning")
+        else:
+            self.finish_signal.emit("结果", f"导入完成：成功导入 {imported_count} 个，跳过 {skipped_count} 个", "success")
+
     def import_sample_job(self, parameter: dict):
         dir_path: str = parameter["dir_path"]
         self.backup_directory(dir_path)
