@@ -1,11 +1,12 @@
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QFile, QFileInfo, QStandardPaths, Qt
+from PySide6.QtCore import QDir, QFile, QFileInfo, QStandardPaths, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QVBoxLayout
+from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QPushButton, QVBoxLayout
 
 from qfluentwidgets import FluentIcon, HorizontalSeparator, LargeTitleLabel, PushSettingCard, TransparentPushButton
 from Source.Job.wproj_job import WprojJob
+from Source.UI.Basic.error_info_bar import ErrorInfoBar
 from Source.UI.Interface.ProjectInterface.external_source_sub_window import ExternalSourceSubWindow
 from Source.UI.Interface.ProjectInterface.soundbank_sub_window import SoundbankSubWindow
 from Source.UI.Interface.ProjectInterface.wwise_project_sub_window import WwiseProjectSubWindow
@@ -43,6 +44,7 @@ class ProjectTabWindow(QFrame):
         self._project_title.setText(project_title)
 
         wwise_project_path: str = project_data.get(ProjectData.WWISE_PROJECT_PATH)
+        self._update_open_wwise_project_root_button_state(wwise_project_path)
         if wwise_project_path:
             wproj_root_element = self.wproj_job.read_wproj_file(wwise_project_path)
             self._wwise_project_sub_window.show()
@@ -75,11 +77,23 @@ class ProjectTabWindow(QFrame):
     def _init_wwise_project_path_push_setting_card(self):
         self._wwise_project_path_push_setting_card = PushSettingCard("选择Wwise工程文件", FluentIcon.TILES, "Wwise工程", "*.wproj", self)
         self._wwise_project_path_push_setting_card.clicked.connect(self._on_wwise_project_path_push_setting_card_clicked)
+
+        self._open_wwise_project_root_button: QPushButton = QPushButton("打开Wwise工程根目录", self._wwise_project_path_push_setting_card)
+        self._open_wwise_project_root_button.setCheckable(False)
+        self._open_wwise_project_root_button.setEnabled(False)
+        self._open_wwise_project_root_button.clicked.connect(self._on_open_wwise_project_root_button_clicked)
+
+        card_layout = self._wwise_project_path_push_setting_card.hBoxLayout
+        insert_index = card_layout.count() - 1
+        card_layout.insertSpacing(insert_index, 8)
+        card_layout.insertWidget(insert_index + 1, self._open_wwise_project_root_button, 0, Qt.AlignmentFlag.AlignRight)
+
         project_data: dict = config_utility.get_project_data(self.project_id)
         if project_data:
             wproj_file_path = project_data.get(ProjectData.WWISE_PROJECT_PATH, "")
             if wproj_file_path:
                 self._wwise_project_path_push_setting_card.setContent(wproj_file_path)
+                self._update_open_wwise_project_root_button_state(wproj_file_path)
         self.vbox_layout.addWidget(self._wwise_project_path_push_setting_card)
 
     def _init_unity_wwise_bank_path_push_setting_card(self):
@@ -133,6 +147,25 @@ class ProjectTabWindow(QFrame):
             self._wwise_project_path_push_setting_card.setContent(wproj_file_path)
             self.refresh_wwise_project_data()
             self._main_window.title_bar.refresh()
+
+    def _on_open_wwise_project_root_button_clicked(self):
+        project_data: dict = config_utility.get_project_data(self.project_id)
+        wproj_file_path: str = ""
+        if project_data:
+            wproj_file_path = project_data.get(ProjectData.WWISE_PROJECT_PATH, "")
+
+        wwise_project_root_path = Path(wproj_file_path).parent if wproj_file_path else None
+        if not wwise_project_root_path or not wwise_project_root_path.exists():
+            ErrorInfoBar("Wwise工程根目录不存在或不可访问", self)
+            self._update_open_wwise_project_root_button_state(wproj_file_path)
+            return
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(wwise_project_root_path))):
+            ErrorInfoBar("打开Wwise工程根目录失败", self)
+
+    def _update_open_wwise_project_root_button_state(self, wproj_file_path: str | None):
+        is_valid_wproj_file = bool(wproj_file_path and QFile.exists(wproj_file_path))
+        self._open_wwise_project_root_button.setEnabled(is_valid_wproj_file)
 
     def _on_unity_wwise_bank_path_push_setting_card_clicked(self):
         unity_wwise_bank_path_file_dialog: QFileDialog = QFileDialog(self)
